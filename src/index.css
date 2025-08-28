@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* optional helpers to match your styles */
+.glass { background: rgba(255,255,255,0.04); backdrop-filter: blur(10px); }
+.glass-header { background: rgba(255,255,255,0.06); backdrop-filter: blur(6px); }
+.field { background: rgba(255,255,255,0.05); color: #fff; }

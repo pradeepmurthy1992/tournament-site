@@ -402,7 +402,12 @@ export default function TournamentMaker() {
       const bId = slots[i + 1] ? nameToId[slots[i + 1]] : null;
       if (!aId && !bId) continue; // skip empty-empty
       const bye = !aId || !bId;
-      const winnerId = bye ? aId || bId || null;
+      - const winnerId = bye ? aId || bId || null;
++ let winnerId = null;
++ if (bye) {
++   winnerId = aId || bId || null;
++ }
+
       matches.push({
         id: uid(),
         round: 1,
@@ -534,7 +539,12 @@ export default function TournamentMaker() {
           const bId = winners[i + 1] || null;
           if (!aId && !bId) continue;
           const bye = !aId || !bId;
-          const winnerId = bye ? aId || bId || null : null;
+          - const winnerId = bye ? aId || bId || null;
++ let winnerId = null;
++ if (bye) {
++   winnerId = aId || bId || null;
++ }
+
           next.push({
             id: uid(),
             round: nextRoundNo,
@@ -658,7 +668,12 @@ export default function TournamentMaker() {
           const aId = idByName[aName];
           const bId = bName ? idByName[bName] : null;
           const bye = !aId || !bId;
-          const winnerId = bye ? aId || bId || null : null; // auto-advance if single
+          - const winnerId = bye ? aId || bId || null;
++ let winnerId = null;
++ if (bye) {
++   winnerId = aId || bId || null;
++ }
+ // auto-advance if single
           newR1Matches.push({
             id: uid(),
             round: 1,

@@ -5,7 +5,7 @@ import * as XLSX from "xlsx";
  * Tournament Maker — Multiple Concurrent Tournaments (TT & Badminton)
  * Dark UI • Tabs: SCHEDULE (admin only), FIXTURES, STANDINGS, WINNERS, DELETED (admin only)
  *
- * Update:
+ * Updates:
  * - Delete action requires admin password re-entry & confirmation (no instant delete).
  * - Deleted tournaments are moved to a DELETED list (not erased) with deletedAt timestamp.
  * - DELETED tab is visible & accessible ONLY to Admin.
@@ -402,11 +402,12 @@ export default function TournamentMaker() {
       const bId = slots[i + 1] ? nameToId[slots[i + 1]] : null;
       if (!aId && !bId) continue; // skip empty-empty
       const bye = !aId || !bId;
-      - const winnerId = bye ? aId || bId || null;
-+ let winnerId = null;
-+ if (bye) {
-+   winnerId = aId || bId || null;
-+ }
+
+      // (fixed) avoid ternary parsing issue
+      let winnerId = null;
+      if (bye) {
+        winnerId = aId || bId || null;
+      }
 
       matches.push({
         id: uid(),
@@ -539,11 +540,12 @@ export default function TournamentMaker() {
           const bId = winners[i + 1] || null;
           if (!aId && !bId) continue;
           const bye = !aId || !bId;
-          - const winnerId = bye ? aId || bId || null;
-+ let winnerId = null;
-+ if (bye) {
-+   winnerId = aId || bId || null;
-+ }
+
+          // (fixed)
+          let winnerId = null;
+          if (bye) {
+            winnerId = aId || bId || null;
+          }
 
           next.push({
             id: uid(),
@@ -668,12 +670,13 @@ export default function TournamentMaker() {
           const aId = idByName[aName];
           const bId = bName ? idByName[bName] : null;
           const bye = !aId || !bId;
-          - const winnerId = bye ? aId || bId || null;
-+ let winnerId = null;
-+ if (bye) {
-+   winnerId = aId || bId || null;
-+ }
- // auto-advance if single
+
+          // (fixed) auto-advance if single
+          let winnerId = null;
+          if (bye) {
+            winnerId = aId || bId || null;
+          }
+
           newR1Matches.push({
             id: uid(),
             round: 1,
@@ -1414,24 +1417,6 @@ Meera`}
       // eslint-disable-next-line no-console
       console.log(`[TEST] ${name}: ${pass ? "PASS" : "FAIL"}`, { got, expected });
     }
-
-    // CSV tests
-    const csvLF = "Players,Rank\nAkhil,1\nDevi,2\nRahul,3";
-    const csvCRLF = "Players,Rank\r\nMeera,1\r\nMayur,2\r\nZara,3";
-    const csvTab = "Players\tRank\nP1\t1\nP2\t2";
-    const csvSemi = "Players;Rank\nS1;1\nS2;2";
-    const csvNoCol = "Name\nX\nY";
-    // assertEqual("CSV LF", parseCSVPlayers(csvLF), ["Akhil", "Devi", "Rahul"]);
-    // assertEqual("CSV CRLF", parseCSVPlayers(csvCRLF), ["Meera", "Mayur", "Zara"]);
-    // assertEqual("CSV Tab", parseCSVPlayers(csvTab), ["P1", "P2"]);
-    // assertEqual("CSV Semi", parseCSVPlayers(csvSemi), ["S1", "S2"]);
-    // assertEqual("CSV Missing Players", parseCSVPlayers(csvNoCol), []);
-
-    // Dedupe test
-    const csvDup = "Players\nA\nB\nA\n a \nB";
-    // assertEqual("CSV Dedupe", parseCSVPlayers(csvDup), ["A", "B"]);
-
-    // XLSX in-memory test omitted in production
 
     // Helper tests
     assertEqual("normalizeHeader players", normalizeHeader(" Players "), "players");

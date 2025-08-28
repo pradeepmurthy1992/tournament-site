@@ -3,15 +3,16 @@ import * as XLSX from "xlsx";
 
 /**
  * Tournament Maker — Multiple Concurrent Tournaments (TT & Badminton)
- * Tabs: SCHEDULE (admin only), FIXTURES, STANDINGS, WINNERS, DELETED (admin only)
+ * Dark UI • Tabs: SCHEDULE (admin only), FIXTURES, STANDINGS, WINNERS, DELETED (admin only)
  *
+ * Features:
  * - Admin login to access SCHEDULE.
  * - Delete asks for password again + confirm; moves item to DELETED (not permanent).
  * - DELETED tab (admin-only) with Restore to bring it back to FIXTURES.
- * - Persists via GitHub (through a Vercel serverless API).
  */
 
 const TM_BLUE = "#0f4aa1";
+const STORAGE_KEY = "tourney_multi_dark_v1";
 const NEW_TOURNEY_SENTINEL = "__NEW__";
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -19,10 +20,6 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 const ADMIN_USERNAME = "admin";
 const ADMIN_PASSWORD = "gameport123";
 
-// Your Vercel API endpoint (see previous instructions)
-const API_URL = "https://<your-vercel-project>.vercel.app/api/tournaments";
-
-/* ----------------------------- Helpers ----------------------------- */
 function normalizeHeader(h) {
   return String(h || "").trim().toLowerCase();
 }
@@ -84,7 +81,6 @@ function timeStr(ts) {
   }
 }
 
-/* ----------------------------- UI Bits ----------------------------- */
 function TabButton({ id, label, tab, setTab }) {
   const active = tab === id;
   return (
@@ -182,73 +178,55 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
   );
 }
 
-/* ----------------------------- Main Component ----------------------------- */
 export default function TournamentMaker() {
   const [tab, setTab] = useState("fixtures");
 
-  // Admin UI state (still local-only; API security is on the server)
   const [isAdmin, setIsAdmin] = useState(() => localStorage.getItem("gp_is_admin") === "1");
   const [showLogin, setShowLogin] = useState(false);
   const [loginId, setLoginId] = useState("");
   const [loginPw, setLoginPw] = useState("");
 
-  // Builder state
   const [tName, setTName] = useState("");
   const [targetTournamentId, setTargetTournamentId] = useState(NEW_TOURNEY_SENTINEL);
   const [namesText, setNamesText] = useState("");
   const [seed1, setSeed1] = useState("");
   const [seed2, setSeed2] = useState("");
   const [builderTeams, setBuilderTeams] = useState([]);
+
   const uploadRef = useRef(null);
 
-  // Data
   const [tournaments, setTournaments] = useState(() => []);
   const [deletedTournaments, setDeletedTournaments] = useState(() => []);
 
-  // Delete modal
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deletePw, setDeletePw] = useState("");
-  the
   const [deleteTargetId, setDeleteTargetId] = useState(null);
 
-  // ---- Load from API on mount ----
   useEffect(() => {
-    (async () => {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
       try {
-        const r = await fetch(API_URL, { method: "GET" });
-        const snap = await r.json();
-        if (!r.ok) throw new Error(snap?.error || "Load failed");
-        const t = Array.isArray(snap.tournaments) ? snap.tournaments : [];
-        const d = Array.isArray(snap.deleted) ? snap.deleted : [];
-        setTournaments(t);
-        setDeletedTournaments(d);
-      } catch (e) {
-        console.warn("Load error:", e);
-        setTournaments([]);
-        setDeletedTournaments([]);
-      }
-    })();
+        const data = JSON.parse(stored);
+        if (Array.isArray(data)) {
+          setTournaments(data);
+          setDeletedTournaments([]);
+        } else if (data && typeof data === "object") {
+          setTournaments(Array.isArray(data.tournaments) ? data.tournaments : []);
+          setDeletedTournaments(Array.isArray(data.deleted) ? data.deleted : []);
+        }
+      } catch {}
+    }
   }, []);
 
-  // ---- Save to API ----
-  async function saveAll() {
+  const saveAll = () => {
     if (!isAdmin) return alert("Admin only.");
-    try {
-      const r = await fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tournaments, deleted: deletedTournaments }),
-      });
-      const resp = await r.json();
-      if (!r.ok) throw new Error(resp?.error || "Save failed");
-      alert("Saved.");
-    } catch (e) {
-      alert("Save failed. Check console.");
-      console.error(e);
-    }
-  }
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ tournaments, deleted: deletedTournaments })
+    );
+    alert("Saved.");
+  };
 
-  // ---- Admin login (UI only) ----
   function handleLogin(e) {
     e?.preventDefault?.();
     if (loginId === ADMIN_USERNAME && loginPw === ADMIN_PASSWORD) {
@@ -267,7 +245,6 @@ export default function TournamentMaker() {
     if (tab === "schedule" || tab === "deleted") setTab("fixtures");
   }
 
-  // ---- Builder helpers ----
   const builderTeamMap = useMemo(
     () => Object.fromEntries(builderTeams.map((tm) => [tm.name, tm.id])),
     [builderTeams]
@@ -309,7 +286,6 @@ export default function TournamentMaker() {
     }
   }
 
-  // ---- Core logic ----
   function generateRound1Matches(teams, seedTopName, seedBottomName) {
     const names = teams.map((x) => x.name);
     let size = 1;
@@ -533,7 +509,6 @@ export default function TournamentMaker() {
     setTab("fixtures");
   }
 
-  // Apply new entries to existing tournament
   function applyEntriesToTournament(tournamentId, newNames) {
     if (!isAdmin) return alert("Admin only.");
     setTournaments((prev) =>
@@ -556,7 +531,6 @@ export default function TournamentMaker() {
 
         let matches = tn.matches.map((m) => ({ ...m }));
 
-        // Fill BYEs in round 1
         const r1_before = matches.filter((m) => m.round === 1);
         const byeSlots = [];
         for (const m of r1_before) {
@@ -580,11 +554,10 @@ export default function TournamentMaker() {
           }
         }
 
-        // Remaining names → new R1 matches
         const newR1Matches = [];
         while (nameQueue.length > 0) {
           const aName = nameQueue.shift();
-          const bName = nameQueue.shift() || null; // odd -> BYE
+          const bName = nameQueue.shift() || null;
           const aId = idByName[aName];
           const bId = bName ? idByName[bName] : null;
           const bye = !aId || !bId;
@@ -604,7 +577,6 @@ export default function TournamentMaker() {
         const nonR1 = matches.filter((m) => m.round !== 1);
         const existingR1 = matches.filter((m) => m.round === 1);
 
-        // Keep seeds at top/bottom
         const seedTopId = tn.seedTopId || null;
         const seedBottomId = tn.seedBottomId || null;
         if (seedTopId && seedBottomId) {
@@ -621,11 +593,11 @@ export default function TournamentMaker() {
             let backInserts = 0;
             newR1Matches.forEach((nm, idx) => {
               if (idx % 2 === 0) {
-                const pos = frontInserts; // near top
+                const pos = frontInserts;
                 between.splice(pos, 0, nm);
                 frontInserts++;
               } else {
-                const pos = between.length - backInserts; // near bottom
+                const pos = between.length - backInserts;
                 between.splice(pos, 0, nm);
                 backInserts++;
               }
@@ -648,11 +620,9 @@ export default function TournamentMaker() {
     );
   }
 
-  // Derived
   const activeTournaments = tournaments.filter((tn) => tn.status === "active");
   const completedTournaments = tournaments.filter((tn) => tn.status === "completed");
 
-  // Styles
   const gpStyles = `
 @keyframes diagPan { 0% { background-position: 0 0; } 100% { background-position: 400px 400px; } }
 @keyframes floatPan { 0% { transform: translate3d(0,0,0); } 100% { transform: translate3d(-80px,-80px,0); } }
@@ -664,12 +634,10 @@ export default function TournamentMaker() {
 .field { background: rgba(255,255,255,0.05); color: #fff; }
 `;
 
-  /* ----------------------------- Render ----------------------------- */
   return (
     <div className="p-4 text-white min-h-screen pageBg" style={{ position: "relative", zIndex: 1 }}>
       <style>{gpStyles}</style>
 
-      {/* HERO */}
       <section className="relative rounded-2xl overflow-hidden border mb-4 min-h-[25vh] flex items-center" style={{ borderColor: TM_BLUE }}>
         <div className="relative p-6 md:p-8 w-full gpGroup">
           <h1 className="text-5xl md:text-7xl lg:text-8xl font-extrabold tracking-widest text-center select-none">
@@ -679,7 +647,6 @@ export default function TournamentMaker() {
         </div>
       </section>
 
-      {/* Tabs / Actions */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex gap-2">
           {isAdmin && <TabButton id="schedule" label="SCHEDULE" tab={tab} setTab={setTab} />}
@@ -706,7 +673,6 @@ export default function TournamentMaker() {
         </div>
       </div>
 
-      {/* Admin Login Modal */}
       {showLogin && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="w-[90vw] max-w-sm border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
@@ -730,7 +696,6 @@ export default function TournamentMaker() {
         </div>
       )}
 
-      {/* Delete modal */}
       {showDeleteModal && isAdmin && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
           <div className="w-[90vw] max-w-md border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
@@ -750,7 +715,6 @@ export default function TournamentMaker() {
         </div>
       )}
 
-      {/* SCHEDULE */}
       {tab === "schedule" &&
         (isAdmin ? (
           <section className="grid md:grid-cols-2 gap-4">
@@ -872,7 +836,6 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
           </section>
         ))}
 
-      {/* FIXTURES */}
       {tab === "fixtures" && (
         <section>
           {activeTournaments.length === 0 && (
@@ -936,7 +899,6 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
-      {/* STANDINGS */}
       {tab === "standings" && (
         <section>
           {tournaments.length === 0 && (
@@ -993,7 +955,6 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
-      {/* WINNERS */}
       {tab === "winners" && (
         <section>
           {completedTournaments.length === 0 && <p className="text-white/80 text-sm">No completed tournaments yet. Finish one in <b>FIXTURES</b>.</p>}
@@ -1047,7 +1008,6 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
-      {/* DELETED (Admin-only) */}
       {tab === "deleted" &&
         (isAdmin ? (
           <section>
@@ -1113,13 +1073,12 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
           </section>
         ))}
 
-      {/* FOOTER */}
       <footer className="fixed bottom-4 right-6 text-2xl font-bold text-white/80">CV ENGG TML</footer>
     </div>
   );
 }
 
-/* (Optional sanity check disabled)
+/* Minimal sanity checks in console (disabled) */
 (function runDevTests() {
   try {
     const IS_DEV = false;

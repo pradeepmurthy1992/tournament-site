@@ -9,7 +9,6 @@ import * as XLSX from "xlsx";
  * - Delete action requires admin password re-entry & confirmation (no instant delete).
  * - Deleted tournaments are moved to a DELETED list (not erased) with deletedAt timestamp.
  * - DELETED tab is visible & accessible ONLY to Admin.
- * - NEW: Restore action in DELETED tab returns a tournament back to active list and resumes exactly where it left off.
  */
 
 // ----------------------------- Theme -----------------------------
@@ -17,7 +16,7 @@ const TM_BLUE = "#0f4aa1"; // Tata Motors blue
 const TM_CYAN = "#00b1e7"; // Accent
 
 // ----------------------------- Constants & Helpers -----------------------------
-const STORAGE_KEY = "tourney_multi_dark_v1"; // localStorage key (stores {tournaments:[], deleted:[]})
+const STORAGE_KEY = "tourney_multi_dark_v1"; // localStorage key (now stores {tournaments:[], deleted:[]})
 const NEW_TOURNEY_SENTINEL = "__NEW__"; // dropdown option value for creating a brand-new tournament
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -242,7 +241,6 @@ export default function TournamentMaker() {
   // Delete confirmation modal state
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deletePw, setDeletePw] = useState("");
-  thead;
   const [deleteTargetId, setDeleteTargetId] = useState(null);
 
   // Load from localStorage (backward compatible with older array format)
@@ -405,6 +403,7 @@ export default function TournamentMaker() {
       if (!aId && !bId) continue; // skip empty-empty
       const bye = !aId || !bId;
 
+      // (fixed) avoid ternary parsing issue
       let winnerId = null;
       if (bye) {
         winnerId = aId || bId || null;
@@ -542,6 +541,7 @@ export default function TournamentMaker() {
           if (!aId && !bId) continue;
           const bye = !aId || !bId;
 
+          // (fixed)
           let winnerId = null;
           if (bye) {
             winnerId = aId || bId || null;
@@ -605,25 +605,6 @@ export default function TournamentMaker() {
     setShowDeleteModal(false);
     setDeleteTargetId(null);
     setDeletePw("");
-  }
-
-  // ---------- NEW: Restore flow ----------
-  function restoreTournament(tournamentId) {
-    if (!isAdmin) {
-      alert("Admin only.");
-      return;
-    }
-    setDeletedTournaments((prevDeleted) => {
-      const idx = prevDeleted.findIndex((t) => t.id === tournamentId);
-      if (idx === -1) return prevDeleted;
-      const t = prevDeleted[idx];
-      const restDeleted = [...prevDeleted.slice(0, idx), ...prevDeleted.slice(idx + 1)];
-      // remove deletedAt marker before restoring
-      const { deletedAt, ...restored } = t;
-      setTournaments((prev) => [restored, ...prev]);
-      return restDeleted;
-    });
-    setTab("fixtures");
   }
 
   // Add new entries to an existing tournament:
@@ -690,7 +671,8 @@ export default function TournamentMaker() {
           const bId = bName ? idByName[bName] : null;
           const bye = !aId || !bId;
 
-          let winnerId = null; // auto-advance if single
+          // (fixed) auto-advance if single
+          let winnerId = null;
           if (bye) {
             winnerId = aId || bId || null;
           }
@@ -847,15 +829,6 @@ export default function TournamentMaker() {
               onClick={saveAll}
             >
               Save Results
-            </button>
-          )}
-          {tab === "deleted" && isAdmin && (
-            <button
-              className="px-3 py-2 border rounded hover:opacity-90"
-              style={{ borderColor: TM_BLUE }}
-              onClick={saveAll}
-            >
-              Save
             </button>
           )}
           {!isAdmin ? (
@@ -1365,7 +1338,7 @@ Meera`}
         </section>
       )}
 
-      {/* DELETED (Admin-only) with RESTORE */}
+      {/* DELETED (Admin-only) */}
       {tab === "deleted" &&
         (isAdmin ? (
           <section>
@@ -1378,21 +1351,7 @@ Meera`}
                   tn.createdAt
                 )} • Players: ${tn.teams.length}`;
                 return (
-                  <Collapsible
-                    key={tn.id}
-                    title={tn.name}
-                    subtitle={subtitle}
-                    right={
-                      <button
-                        className="px-3 py-1 rounded border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
-                        onClick={() => restoreTournament(tn.id)}
-                        title="Restore to Fixtures"
-                      >
-                        Restore
-                      </button>
-                    }
-                    defaultOpen={false}
-                  >
+                  <Collapsible key={tn.id} title={tn.name} subtitle={subtitle} defaultOpen={false}>
                     <div className="text-sm space-y-2">
                       <div>
                         <b>Status when deleted:</b> {tn.status}

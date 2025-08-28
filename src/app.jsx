@@ -20,6 +20,47 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 const ADMIN_USERNAME = "admin";
 const ADMIN_PASSWORD = "gameport123";
 
+// ---- at top of app.jsx ----
+const API_URL = "https://<your-vercel-project>.vercel.app/api/tournaments"; // or your custom domain
+
+// ---- inside component ----
+useEffect(() => {
+  (async () => {
+    try {
+      const r = await fetch(API_URL, { method: "GET" });
+      const snap = await r.json();
+      if (!r.ok) throw new Error(snap?.error || "Load failed");
+
+      const t = Array.isArray(snap.tournaments) ? snap.tournaments : [];
+      const d = Array.isArray(snap.deleted) ? snap.deleted : [];
+      setTournaments(t);
+      setDeletedTournaments(d);
+    } catch (e) {
+      console.warn("Load error:", e);
+      // fallback to empty (or keep your localStorage fallback if you want)
+      setTournaments([]);
+      setDeletedTournaments([]);
+    }
+  })();
+}, []);
+
+async function saveAll() {
+  if (!isAdmin) return alert("Admin only.");
+  try {
+    const r = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tournaments, deleted: deletedTournaments }),
+    });
+    const resp = await r.json();
+    if (!r.ok) throw new Error(resp?.error || "Save failed");
+    alert("Saved.");
+  } catch (e) {
+    alert("Save failed. Check console.");
+    console.error(e);
+  }
+}
+
 function normalizeHeader(h) {
   return String(h || "").trim().toLowerCase();
 }

@@ -52,8 +52,9 @@ function parseCSVPlayers(text) {
     const cols = lines[i].split(sep);
     names.push((cols[idx] || "").trim());
   }
-  return uniqueNames(names);
+  return names; // raw list, NOT unique
 }
+
 async function parseExcelPlayers(arrayBuffer) {
   try {
     const workbook = XLSX.read(arrayBuffer, { type: "array" });
@@ -64,12 +65,13 @@ async function parseExcelPlayers(arrayBuffer) {
     const keys = Object.keys(rows[0] || {});
     const key = keys.find((k) => normalizeHeader(k) === "players");
     if (!key) return [];
-    const names = rows.map((r) => r[key]).filter(Boolean);
-    return uniqueNames(names);
+    const names = rows.map((r) => String(r[key] || "").trim()).filter(Boolean);
+    return names; // raw list, NOT unique
   } catch {
     return [];
   }
 }
+
 
 /** Short round code by match-count in that round */
 function stageShort(count) {
@@ -562,40 +564,67 @@ export default function TournamentMaker() {
   );
 
   function loadTeamsFromText() {
-    if (!isAdmin) return alert("Admin only.");
-    const lines = namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    const uniq = Array.from(new Set(lines));
-    const teams = uniq.map((n) => ({ id: uid(), name: n }));
-    setBuilderTeams(teams);
-    if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
-      setSeed1(uniq[0] || "");
-      setSeed2(uniq[1] || "");
-    }
+  if (!isAdmin) return alert("Admin only.");
+  const lines = namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  if (lines.length === 0) return alert("Please enter at least one player.");
+
+  const dups = findDuplicateNamesCaseInsensitive(lines);
+  if (dups.length > 0) {
+    alert(
+      "Duplicate names found:\n\n" +
+      dups.map((n) => `• ${n}`).join("\n") +
+      "\n\nPlease remove duplicates and try again."
+    );
+    return;
   }
 
-  async function handlePlayersUpload(file) {
-    if (!isAdmin) return alert("Admin only.");
-    if (!file) return;
-    const ext = (file.name.split(".").pop() || "").toLowerCase();
-    let names = [];
-    if (ext === "csv") {
-      const text = await file.text();
-      names = parseCSVPlayers(text);
-    } else if (ext === "xlsx" || ext === "xls") {
-      const buf = await file.arrayBuffer();
-      names = await parseExcelPlayers(buf);
-    } else {
-      alert("Unsupported file type. Please upload .csv, .xlsx, or .xls");
-      return;
-    }
-    if (names.length === 0) return alert("Could not find a 'Players' column in the file.");
-    const teams = names.map((n) => ({ id: uid(), name: n }));
-    setBuilderTeams(teams);
-    if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
-      setSeed1(names[0] || "");
-      setSeed2(names[1] || "");
-    }
+  // no duplicates: build teams
+  const teams = lines.map((n) => ({ id: uid(), name: n }));
+  setBuilderTeams(teams);
+
+  if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
+    setSeed1(lines[0] || "");
+    setSeed2(lines[1] || "");
   }
+}
+
+
+  async function handlePlayersUpload(file) {
+  if (!isAdmin) return alert("Admin only.");
+  if (!file) return;
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  let names = [];
+  if (ext === "csv") {
+    const text = await file.text();
+    names = parseCSVPlayers(text);
+  } else if (ext === "xlsx" || ext === "xls") {
+    const buf = await file.arrayBuffer();
+    names = await parseExcelPlayers(buf);
+  } else {
+    alert("Unsupported file type. Please upload .csv, .xlsx, or .xls");
+    return;
+  }
+  if (names.length === 0) return alert("Could not find a 'Players' column in the file.");
+
+  const dups = findDuplicateNamesCaseInsensitive(names);
+  if (dups.length > 0) {
+    alert(
+      "Duplicate names found in the uploaded file:\n\n" +
+      dups.map((n) => `• ${n}`).join("\n") +
+      "\n\nPlease remove duplicates and try again."
+    );
+    return;
+  }
+
+  const teams = names.map((n) => ({ id: uid(), name: n }));
+  setBuilderTeams(teams);
+
+  if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
+    setSeed1(names[0] || "");
+    setSeed2(names[1] || "");
+  }
+}
+
 
   function generateRound1Matches(teams, seedTopName, seedBottomName) {
     const names = teams.map((x) => x.name);
@@ -669,6 +698,20 @@ export default function TournamentMaker() {
       applyEntriesToTournament(targetTournamentId, names); // NOTE: still referenced, implement if needed.
       return;
     }
+     // Duplicate guard (case-insensitive)
+{
+  const names = builderTeams.map((t) => t.name);
+  const dups = findDuplicateNamesCaseInsensitive(names);
+  if (dups.length > 0) {
+    alert(
+      "Duplicate names found:\n\n" +
+      dups.map((n) => `• ${n}`).join("\n") +
+      "\n\nPlease remove duplicates and try again."
+    );
+    return;
+  }
+}
+
     if (!tName.trim()) return alert("Please enter a Tournament Name.");
     if (builderTeams.length < 2) return alert("Please add at least 2 entries.");
     if (!seed1 || !seed2 || seed1 === seed2) return alert("Pick two different seeds.");
@@ -826,6 +869,17 @@ export default function TournamentMaker() {
     setDeletedTournaments((prev) => prev.filter((t) => t.id !== tournamentId));
     // Click "Save" to persist to JSONBin.
   }
+function findDuplicateNamesCaseInsensitive(names) {
+  const seen = new Map(); // lcName -> originalName (first seen)
+  const dupSet = new Set(); // lcName duplicates
+  for (const raw of names.map((s) => String(s || "").trim()).filter(Boolean)) {
+    const lc = raw.toLowerCase();
+    if (seen.has(lc)) dupSet.add(lc);
+    else seen.set(lc, raw);
+  }
+  // return duplicates using their first-seen casing for readability
+  return Array.from(dupSet).map((lc) => seen.get(lc));
+}
 
   // Save
   const saveAll = async () => {

@@ -144,18 +144,16 @@ function exportTournamentToExcel(tn) {
 // ---------- Export: PDF ----------
 // ---------- Export: PDF (canvas-drawn bracket with connector lines incl. Champion) ----------
 // ---------- Export: PDF (full bracket with connector lines + placeholders) ----------
-// ---------- Export: PDF (white background, full bracket, multi-page tiling) ----------
+// ---------- Export: PDF (white theme, multi-page, NO card splitting) ----------
 async function exportTournamentToPDF(tn) {
   const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
-
   const groupedReal = groupMatchesByRound(tn);
   if (!groupedReal.length) return alert("No matches to export.");
 
-  // Build a complete bracket shape (virtual rounds + placeholders)
+  // Build full bracket shape (fill missing rounds with virtual TBD matches)
   const round1Count = Math.max(1, groupedReal[0].matches.length);
-  const slots = Math.max(2, round1Count * 2); // coverage when round 1 is partial
+  const slots = Math.max(2, round1Count * 2);
   const totalRounds = Math.max(1, Math.round(Math.log2(slots)));
-
   const realByNum = new Map(groupedReal.map(({ round, matches }) => [round, matches]));
   const allRounds = [];
   for (let ri = 0; ri < totalRounds; ri++) {
@@ -180,7 +178,7 @@ async function exportTournamentToPDF(tn) {
     );
   }
 
-  // Labels
+  // Labels / helpers
   const stageShort = (count) => {
     if (count === 1) return "F";
     if (count === 2) return "SF";
@@ -194,13 +192,11 @@ async function exportTournamentToPDF(tn) {
   const winnerOfLabel = (prevRoundMatchCount, prevMatchIndex) =>
     `Winner of ${stageShort(prevRoundMatchCount)}${prevMatchIndex + 1}`;
 
-  // Name resolution (show “Winner of …” placeholders)
   function nameForSlot(ri, mi, side) {
     const currRound = allRounds[ri];
     const m = currRound.matches[mi];
     const id = side === "A" ? m.aId : m.bId;
     if (id) return teamMap[id] || "Unknown";
-
     if (ri > 0) {
       const prevRound = allRounds[ri - 1];
       const prevCount = prevRound.matches.length;
@@ -223,11 +219,11 @@ async function exportTournamentToPDF(tn) {
   };
   const winnerText = (m) => (m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD");
 
-  // ----- Layout (white theme) -----
+  // Layout constants (white theme)
   const margin = 28;
   const headerH = 60;
 
-  const colWidth = 320;      // wide for placeholder strings
+  const colWidth = 320;
   const boxW = 250;
   const boxH = 84;
   const innerPad = 10;
@@ -241,7 +237,7 @@ async function exportTournamentToPDF(tn) {
   const roundY = (ri, mi) =>
     margin + headerH + mi * roundSlot(ri) + (roundSlot(ri) - boxH) / 2;
 
-  // Compute required canvas size (include connectors + champion block)
+  // Measure needed canvas size
   let neededMaxY = margin + headerH + boxH;
   let neededMaxX = margin + colWidth * allRounds.length;
 
@@ -283,7 +279,7 @@ async function exportTournamentToPDF(tn) {
   ctx.textBaseline = "top";
   ctx.fillText(`${tn.name} — Fixtures`, margin, margin);
 
-  // Subtle guides
+  // Faint horizontal guides
   ctx.strokeStyle = "rgba(0,0,0,0.06)";
   ctx.lineWidth = 1;
   for (let y = margin + headerH; y <= canvasH - margin - 1; y += 48) {
@@ -293,7 +289,7 @@ async function exportTournamentToPDF(tn) {
     ctx.stroke();
   }
 
-  // helpers
+  // Drawing helpers
   function ellipsize(text, maxPx, font) {
     ctx.save();
     ctx.font = font;
@@ -353,7 +349,9 @@ async function exportTournamentToPDF(tn) {
     return { winnerY };
   }
 
-  // Draw rounds + connectors
+  // Draw rounds + collect “no-cut” rectangles (for page tiling)
+  const noCutRects = []; // [{top,bottom}] in source canvas coordinates
+
   for (let ri = 0; ri < allRounds.length; ri++) {
     const thisRound = allRounds[ri];
     const count = thisRound.matches.length;
@@ -392,10 +390,10 @@ async function exportTournamentToPDF(tn) {
         winnerY
       );
 
+      // Connector to next round
       if (ri < allRounds.length - 1) {
         const nextX = roundX(ri + 1) + 8;
         const parentY = roundY(ri + 1, Math.floor(mi / 2)) + boxH / 2;
-
         const childMidX = x + boxW;
         const childMidY = y + boxH / 2;
 
@@ -407,7 +405,15 @@ async function exportTournamentToPDF(tn) {
         ctx.lineTo(childMidX + elbowGapX, parentY);
         ctx.lineTo(nextX - 10, parentY);
         ctx.stroke();
+
+        // connectors also shouldn't be cut right through their midpoints; add a slim no-cut band
+        const topC = Math.min(childMidY, parentY) - 2;
+        const botC = Math.max(childMidY, parentY) + 2;
+        noCutRects.push({ top: topC, bottom: botC });
       }
+
+      // Add the card area (with small padding) to the no-cut list
+      noCutRects.push({ top: y - 2, bottom: y + boxH + 2 });
     }
   }
 
@@ -443,7 +449,7 @@ async function exportTournamentToPDF(tn) {
     champY + 10 + (cH - 16) / 2 - 4
   );
 
-  // -------- PDF: auto-scale width, then TILE vertically if needed --------
+  // -------- PDF: width-scale + SAFE vertical tiling (snap to gaps) --------
   try {
     const pdf = new window.jspdf.jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
     const pageW = pdf.internal.pageSize.getWidth();
@@ -454,46 +460,57 @@ async function exportTournamentToPDF(tn) {
 
     // scale so canvas width fits page
     const scale = Math.min(1, maxW / canvas.width);
-    const scaledHeight = canvas.height * scale;
+    const tileSourceHeight = Math.floor(maxH / scale); // source pixels per page
 
-    if (scaledHeight <= maxH) {
-      // single page
-      const img = canvas.toDataURL("image/png");
-      const w = canvas.width * scale;
-      const h = canvas.height * scale;
-      pdf.addImage(img, "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
-    } else {
-      // multi-page: slice the source canvas vertically and add each tile as a page
-      const tileSourceHeight = Math.floor(maxH / scale); // height from source to fit one page when scaled
-      const tiles = Math.ceil(canvas.height / tileSourceHeight);
+    const tCanvas = document.createElement("canvas");
+    tCanvas.width = canvas.width;
+    const tctx = tCanvas.getContext("2d");
 
-      // offscreen buffer for each tile
-      const tCanvas = document.createElement("canvas");
-      tCanvas.width = canvas.width;
-      tCanvas.height = tileSourceHeight;
-      const tctx = tCanvas.getContext("2d");
+    let sy = 0;
+    const minChunk = Math.min(tileSourceHeight * 0.6, 600); // prevent tiny pages
 
-      for (let i = 0; i < tiles; i++) {
-        const sy = i * tileSourceHeight;
-        const sh = Math.min(tileSourceHeight, canvas.height - sy);
-
-        // resize tile canvas to last slice height if needed
-        if (tCanvas.height !== sh) {
-          tCanvas.height = sh;
-        }
-
-        // copy slice
-        tctx.fillStyle = "#ffffff";
-        tctx.fillRect(0, 0, tCanvas.width, tCanvas.height);
-        tctx.drawImage(canvas, 0, sy, canvas.width, sh, 0, 0, tCanvas.width, sh);
-
-        const img = tCanvas.toDataURL("image/png");
-        const w = canvas.width * scale;
-        const h = sh * scale;
-
-        if (i > 0) pdf.addPage();
-        pdf.addImage(img, "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
+    function cutsThroughCard(y) {
+      // true if y falls inside any no-cut band
+      for (const r of noCutRects) {
+        if (y > r.top && y < r.bottom) return true;
       }
+      return false;
+    }
+
+    while (sy < canvas.height) {
+      // desired cut
+      let desired = Math.min(canvas.height, sy + tileSourceHeight);
+
+      // snap cut DOWN to nearest safe gap
+      let cut = desired;
+      while (cut > sy + minChunk && cutsThroughCard(cut)) cut -= 2;
+
+      // if still unsafe (or would produce too small slice), snap UP instead
+      if (cutsThroughCard(cut)) {
+        cut = desired;
+        while (cut < Math.min(canvas.height, sy + tileSourceHeight * 1.4) && cutsThroughCard(cut)) cut += 2;
+        // if STILL unsafe, as a last resort move down a tiny bit from current sy
+        if (cutsThroughCard(cut)) {
+          cut = Math.min(canvas.height, sy + tileSourceHeight);
+        }
+      }
+
+      const sh = Math.max(1, Math.min(cut - sy, canvas.height - sy));
+      tCanvas.height = sh;
+
+      // copy the slice
+      tctx.fillStyle = "#ffffff";
+      tctx.fillRect(0, 0, tCanvas.width, tCanvas.height);
+      tctx.drawImage(canvas, 0, sy, canvas.width, sh, 0, 0, canvas.width, sh);
+
+      const img = tCanvas.toDataURL("image/png");
+      const w = canvas.width * scale;
+      const h = sh * scale;
+
+      if (sy > 0) pdf.addPage();
+      pdf.addImage(img, "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
+
+      sy += sh;
     }
 
     pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
@@ -502,6 +519,7 @@ async function exportTournamentToPDF(tn) {
     alert("PDF export failed. Check console.");
   }
 }
+
 
 
 // ---------- UI bits ----------

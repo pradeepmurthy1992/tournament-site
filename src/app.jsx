@@ -640,6 +640,16 @@ export default function TournamentMaker() {
     localStorage.removeItem("gp_is_admin");
     if (tab === "schedule" || tab === "deleted") setTab("fixtures");
   }
+function deleteForever(tournamentId) {
+  if (!isAdmin) return alert("Admin only.");
+  const ok = window.confirm(
+    "Permanently delete this tournament from DELETED?\nThis cannot be undone."
+  );
+  if (!ok) return;
+
+  setDeletedTournaments((prev) => prev.filter((t) => t.id !== tournamentId));
+  // Press the top-right "Save" button to persist this change to JSONBin.
+}
 
   return (
     <div className="p-4 text-white min-h-screen pageBg" style={{ position: "relative", zIndex: 1 }}>
@@ -1030,14 +1040,24 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                     title={tn.name}
                     subtitle={subtitle}
                     right={
-                      <button
-                        className="px-3 py-1 rounded border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
-                        onClick={() => restoreTournament(tn.id)}
-                        title="Restore to Fixtures"
-                      >
-                        Restore
-                      </button>
-                    }
+  <div className="flex items-center gap-2">
+    <button
+      className="px-3 py-1 rounded border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
+      onClick={() => restoreTournament(tn.id)}
+      title="Restore to Fixtures"
+    >
+      Restore
+    </button>
+    <button
+      className="px-3 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
+      onClick={() => deleteForever(tn.id)}
+      title="Delete permanently"
+    >
+      Delete Permanently
+    </button>
+  </div>
+}
+
                     defaultOpen={false}
                   >
                     <div className="text-sm space-y-2">

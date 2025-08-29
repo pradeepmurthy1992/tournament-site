@@ -5,6 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Tournament Maker</title>
   </head>
+  <!-- XLSX for Excel export (global: window.XLSX) -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<!-- html2canvas for rendering HTML to image (global: window.html2canvas) -->
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
+<!-- jsPDF UMD build (global: window.jspdf.jsPDF) -->
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>

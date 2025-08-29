@@ -700,6 +700,7 @@ export default function TournamentMaker() {
   }
 
   /** ---------- PDF (jsPDF + html2canvas via CDN globals) ---------- */
+/** ---------- PDF (jsPDF + html2canvas via CDN globals) ---------- */
 async function exportTournamentToPDF(tn) {
   const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
   const grouped = groupMatchesByRound(tn);
@@ -707,6 +708,153 @@ async function exportTournamentToPDF(tn) {
     alert("No matches to export.");
     return;
   }
+
+  // Build off-screen printable layout
+  const wrap = document.createElement("div");
+  wrap.style.position = "fixed";
+  wrap.style.left = "-99999px";
+  wrap.style.top = "0";
+  wrap.style.width = "2000px";
+  wrap.style.padding = "24px";
+  wrap.style.background = "#0b1120";
+  wrap.style.color = "#fff";
+  wrap.style.fontFamily = "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+
+  const h = document.createElement("div");
+  h.textContent = `${tn.name} — Fixtures`;
+  h.style.fontSize = "28px";
+  h.style.fontWeight = "800";
+  h.style.marginBottom = "18px";
+  wrap.appendChild(h);
+
+  const cols = document.createElement("div");
+  cols.style.display = "flex";
+  cols.style.gap = "18px";
+  cols.style.alignItems = "flex-start";
+  wrap.appendChild(cols);
+
+  const cardStyle = `
+    border:1px solid rgba(255,255,255,.15);
+    border-radius:12px;
+    padding:10px 12px;
+    background: rgba(255,255,255,0.04);
+    min-width: 260px;
+    margin-bottom: 12px;
+  `;
+
+  // helpers that enforce TBD text
+  const playerName = (id) => teamMap[id] || (id ? "Unknown" : "BYE/TBD");
+  const statusText = (m) => {
+    if (m.status && String(m.status).trim()) return m.status;
+    const bothEmpty = !m.aId && !m.bId;
+    const singleBye = (!!m.aId && !m.bId) || (!m.aId && !!m.bId);
+    if (bothEmpty) return "Empty";
+    if (singleBye) return "BYE";
+    return "TBD";
+  };
+  const winnerText = (m) => (m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD");
+
+  grouped.forEach(({ round, matches }) => {
+    const col = document.createElement("div");
+    col.style.minWidth = "280px";
+    col.style.maxWidth = "320px";
+
+    const label = document.createElement("div");
+    label.textContent = stageLabelByCount(matches.length) || `Round ${round}`;
+    label.style.fontWeight = "700";
+    label.style.marginBottom = "8px";
+    col.appendChild(label);
+
+    matches.forEach((m, i) => {
+      const a = playerName(m.aId);
+      const b = playerName(m.bId);
+      const w = winnerText(m);
+      const s = statusText(m);
+
+      const card = document.createElement("div");
+      card.setAttribute("style", cardStyle);
+
+      const head = document.createElement("div");
+      head.style.display = "flex";
+      head.style.justifyContent = "space-between";
+      head.style.fontSize = "12px";
+      head.style.opacity = ".85";
+      head.innerHTML = `<span>Match ${i + 1}</span><span>Status: ${s}</span>`;
+      card.appendChild(head);
+
+      const aDiv = document.createElement("div");
+      aDiv.style.marginTop = "6px";
+      aDiv.textContent = a;
+
+      const vs = document.createElement("div");
+      vs.textContent = (a && b && a !== "BYE/TBD" && b !== "BYE/TBD") ? "vs" : "";
+      vs.style.opacity = ".7";
+      vs.style.fontSize = "12px";
+      vs.style.margin = "2px 0";
+
+      const bDiv = document.createElement("div");
+      bDiv.textContent = b;
+
+      const win = document.createElement("div");
+      win.style.marginTop = "6px";
+      win.innerHTML = `Winner: <b>${w}</b>`;
+
+      card.appendChild(aDiv);
+      if (vs.textContent) card.appendChild(vs);
+      card.appendChild(bDiv);
+      card.appendChild(win);
+
+      col.appendChild(card);
+    });
+
+    cols.appendChild(col);
+  });
+
+  document.body.appendChild(wrap);
+
+  try {
+    const canvas = await window.html2canvas(wrap, {
+      backgroundColor: "#0b1120",
+      scale: 2,
+      useCORS: true,
+    });
+
+    const imgData = canvas.toDataURL("image/png");
+    const pdf = new window.jspdf.jsPDF({
+      orientation: "landscape",
+      unit: "pt",
+      format: "a4",
+    });
+
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const margin = 24;
+    const maxW = pageW - margin * 2;
+    const maxH = pageH - margin * 2;
+
+    const imgW = canvas.width;
+    const imgH = canvas.height;
+    let renderW = maxW;
+    let renderH = (imgH / imgW) * renderW;
+    if (renderH > maxH) {
+      renderH = maxH;
+      renderW = (imgW / imgH) * renderH;
+    }
+
+    pdf.addImage(imgData, "PNG",
+      (pageW - renderW) / 2,
+      (pageH - renderH) / 2,
+      renderW,
+      renderH
+    );
+    pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
+  } catch (e) {
+    console.error("PDF export failed:", e);
+    alert("PDF export failed. Check console.");
+  } finally {
+    document.body.removeChild(wrap);
+  }
+}
 
   // Build off-screen printable layout
   const wrap = document.createElement("div");

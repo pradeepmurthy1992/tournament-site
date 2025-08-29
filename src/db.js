@@ -6,7 +6,7 @@
 //    Example BIN_ID: "66d0f3b1e4b0b123abcd1234"
 //    Example API_KEY starts with "eyJhbGciOi..." (JWT-ish)
 const BIN_ID = "68b1437543b1c97be92ef960";
-const API_KEY = "$2a$10$RC2if/M3lzxRmG99URwANurHm2vnuMXSexYjzak7.10/muiGpovD2";
+const API_KEY = "$2a$10$.quJq36pp2YHNa/NusCAWeH6b0x3NDiApfkB4fnth7SqLYmH5s6PK";
 
 // Optional: simple throttle to avoid hammering JSONBin if you add auto-save later.
 const MIN_SAVE_GAP_MS = 1500;

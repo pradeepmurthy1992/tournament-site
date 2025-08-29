@@ -144,7 +144,7 @@ function exportTournamentToExcel(tn) {
 // ---------- Export: PDF ----------
 // ---------- Export: PDF (canvas-drawn bracket with connector lines incl. Champion) ----------
 // ---------- Export: PDF (full bracket with connector lines + placeholders) ----------
-// ---------- Export: PDF (white background, full bracket, no cropping) ----------
+// ---------- Export: PDF (white background, full bracket, multi-page tiling) ----------
 async function exportTournamentToPDF(tn) {
   const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
 
@@ -153,7 +153,7 @@ async function exportTournamentToPDF(tn) {
 
   // Build a complete bracket shape (virtual rounds + placeholders)
   const round1Count = Math.max(1, groupedReal[0].matches.length);
-  const slots = Math.max(2, round1Count * 2);              // next power-of-two-ish span
+  const slots = Math.max(2, round1Count * 2); // coverage when round 1 is partial
   const totalRounds = Math.max(1, Math.round(Math.log2(slots)));
 
   const realByNum = new Map(groupedReal.map(({ round, matches }) => [round, matches]));
@@ -223,11 +223,11 @@ async function exportTournamentToPDF(tn) {
   };
   const winnerText = (m) => (m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD");
 
-  // ----- Layout (tuned for clarity + enough whitespace) -----
+  // ----- Layout (white theme) -----
   const margin = 28;
   const headerH = 60;
 
-  const colWidth = 320;        // a bit wider for long placeholder text
+  const colWidth = 320;      // wide for placeholder strings
   const boxW = 250;
   const boxH = 84;
   const innerPad = 10;
@@ -236,13 +236,12 @@ async function exportTournamentToPDF(tn) {
 
   const slot0 = Math.max(130, boxH + 44); // base vertical spacing in Round 1
 
-  // Coordinates
   const roundX = (ri) => margin + ri * colWidth;
   const roundSlot = (ri) => slot0 * Math.pow(2, ri);
   const roundY = (ri, mi) =>
     margin + headerH + mi * roundSlot(ri) + (roundSlot(ri) - boxH) / 2;
 
-  // ---- Compute needed canvas height/width (include connectors & champion) ----
+  // Compute required canvas size (include connectors + champion block)
   let neededMaxY = margin + headerH + boxH;
   let neededMaxX = margin + colWidth * allRounds.length;
 
@@ -253,8 +252,6 @@ async function exportTournamentToPDF(tn) {
       const x = roundX(ri) + 8;
       neededMaxY = Math.max(neededMaxY, y + boxH);
       neededMaxX = Math.max(neededMaxX, x + boxW);
-
-      // account for connector elbow reaching next round
       if (ri < allRounds.length - 1) {
         const childMidX = x + boxW;
         const childMidY = y + boxH / 2;
@@ -264,31 +261,29 @@ async function exportTournamentToPDF(tn) {
       }
     }
   }
-
-  // Champion block to the right
   const champBlockW = 200;
   neededMaxX += champBlockW + 40;
 
   const canvasW = Math.ceil(neededMaxX + margin);
-  const canvasH = Math.ceil(neededMaxY + margin + 18); // bottom breathing room
+  const canvasH = Math.ceil(neededMaxY + margin + 18);
 
-  // Create canvas (WHITE background)
+  // Canvas (WHITE)
   const canvas = document.createElement("canvas");
   canvas.width = canvasW;
   canvas.height = canvasH;
   const ctx = canvas.getContext("2d");
 
-  // Background white
+  // Background
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, canvasW, canvasH);
 
-  // Header (black)
+  // Header
   ctx.fillStyle = "#000000";
   ctx.font = "bold 28px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
   ctx.textBaseline = "top";
   ctx.fillText(`${tn.name} — Fixtures`, margin, margin);
 
-  // Subtle guides (light gray)
+  // Subtle guides
   ctx.strokeStyle = "rgba(0,0,0,0.06)";
   ctx.lineWidth = 1;
   for (let y = margin + headerH; y <= canvasH - margin - 1; y += 48) {
@@ -298,7 +293,7 @@ async function exportTournamentToPDF(tn) {
     ctx.stroke();
   }
 
-  // Helpers
+  // helpers
   function ellipsize(text, maxPx, font) {
     ctx.save();
     ctx.font = font;
@@ -325,7 +320,6 @@ async function exportTournamentToPDF(tn) {
     ctx.closePath();
   }
   function drawMatchCard(x, y, w, h, titleLeft, titleRight, line2Left, line2Right) {
-    // very light gray fill, darker gray border
     ctx.fillStyle = "rgba(0,0,0,0.03)";
     roundedRect(x, y, w, h, radius);
     ctx.fill();
@@ -359,7 +353,7 @@ async function exportTournamentToPDF(tn) {
     return { winnerY };
   }
 
-  // Draw the rounds
+  // Draw rounds + connectors
   for (let ri = 0; ri < allRounds.length; ri++) {
     const thisRound = allRounds[ri];
     const count = thisRound.matches.length;
@@ -398,7 +392,6 @@ async function exportTournamentToPDF(tn) {
         winnerY
       );
 
-      // connectors
       if (ri < allRounds.length - 1) {
         const nextX = roundX(ri + 1) + 8;
         const parentY = roundY(ri + 1, Math.floor(mi / 2)) + boxH / 2;
@@ -418,7 +411,7 @@ async function exportTournamentToPDF(tn) {
     }
   }
 
-  // Champion block (right side)
+  // Champion block
   const lastRound = allRounds[allRounds.length - 1];
   const champ = lastRound.matches[0] && lastRound.matches[0].winnerId
     ? (teamMap[lastRound.matches[0].winnerId] || "TBD")
@@ -441,37 +434,74 @@ async function exportTournamentToPDF(tn) {
   ctx.font = "bold 16px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
   ctx.fillStyle = "#000000";
   ctx.fillText(
-    ellipsize(champ, cW - 16, ctx.font),
+    (function () {
+      const maxTextW = cW - 16;
+      const f = "bold 16px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+      return ellipsize(champ, maxTextW, f);
+    })(),
     champX + 8,
     champY + 10 + (cH - 16) / 2 - 4
   );
 
-  // Export to PDF (auto-scale to fit page)
+  // -------- PDF: auto-scale width, then TILE vertically if needed --------
   try {
-    const img = canvas.toDataURL("image/png");
     const pdf = new window.jspdf.jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
-
     const pageW = pdf.internal.pageSize.getWidth();
     const pageH = pdf.internal.pageSize.getHeight();
     const pad = 18;
     const maxW = pageW - pad * 2;
     const maxH = pageH - pad * 2;
 
-    let w = maxW;
-    let h = (canvas.height / canvas.width) * w;
-    if (h > maxH) {
-      h = maxH;
-      w = (canvas.width / canvas.height) * h;
+    // scale so canvas width fits page
+    const scale = Math.min(1, maxW / canvas.width);
+    const scaledHeight = canvas.height * scale;
+
+    if (scaledHeight <= maxH) {
+      // single page
+      const img = canvas.toDataURL("image/png");
+      const w = canvas.width * scale;
+      const h = canvas.height * scale;
+      pdf.addImage(img, "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
+    } else {
+      // multi-page: slice the source canvas vertically and add each tile as a page
+      const tileSourceHeight = Math.floor(maxH / scale); // height from source to fit one page when scaled
+      const tiles = Math.ceil(canvas.height / tileSourceHeight);
+
+      // offscreen buffer for each tile
+      const tCanvas = document.createElement("canvas");
+      tCanvas.width = canvas.width;
+      tCanvas.height = tileSourceHeight;
+      const tctx = tCanvas.getContext("2d");
+
+      for (let i = 0; i < tiles; i++) {
+        const sy = i * tileSourceHeight;
+        const sh = Math.min(tileSourceHeight, canvas.height - sy);
+
+        // resize tile canvas to last slice height if needed
+        if (tCanvas.height !== sh) {
+          tCanvas.height = sh;
+        }
+
+        // copy slice
+        tctx.fillStyle = "#ffffff";
+        tctx.fillRect(0, 0, tCanvas.width, tCanvas.height);
+        tctx.drawImage(canvas, 0, sy, canvas.width, sh, 0, 0, tCanvas.width, sh);
+
+        const img = tCanvas.toDataURL("image/png");
+        const w = canvas.width * scale;
+        const h = sh * scale;
+
+        if (i > 0) pdf.addPage();
+        pdf.addImage(img, "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
+      }
     }
 
-    pdf.addImage(img, "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
     pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
   } catch (e) {
     console.error("PDF export failed:", e);
     alert("PDF export failed. Check console.");
   }
 }
-
 
 
 // ---------- UI bits ----------

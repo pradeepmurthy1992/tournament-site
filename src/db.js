@@ -1,85 +1,47 @@
-// src/db.js — JSONBin persistence (frontend-only)
-// Docs: https://jsonbin.io/api-reference
+// src/db.js
+// Minimal JSONBin v3 adapter for GitHub Pages (no runtime secrets)
+// Make sure your bin is set to Public. Paste your BIN_ID and X-Master-Key.
 
-// ====== CONFIG ======
-// 1) Put your JSONBin Bin ID and API key here.
-//    Example BIN_ID: "66d0f3b1e4b0b123abcd1234"
-//    Example API_KEY starts with "eyJhbGciOi..." (JWT-ish)
 const BIN_ID = "68b1437543b1c97be92ef960";
-const API_KEY = "$2a$10$.quJq36pp2YHNa/NusCAWeH6b0x3NDiApfkB4fnth7SqLYmH5s6PK";
+const MASTER_KEY = "$2a$10$.quJq36pp2YHNa/NusCAWeH6b0x3NDiApfkB4fnth7SqLYmH5s6PK"; // starts with "•••" in JSONBin UI
+const BASE = "https://api.jsonbin.io/v3";
 
-// Optional: simple throttle to avoid hammering JSONBin if you add auto-save later.
-const MIN_SAVE_GAP_MS = 1500;
+function hdr(json = false) {
+  const h = {
+    "X-Master-Key": MASTER_KEY,
+    "X-Bin-Meta": "false",
+  };
+  if (json) h["Content-Type"] = "application/json";
+  return h;
+}
 
-// ====== CONSTANTS ======
-const BASE = "https://api.jsonbin.io/v3/b";
-const HEADERS_AUTH = { "X-Master-Key": API_KEY };
-const HEADERS_JSON = {
-  "Content-Type": "application/json",
-  ...HEADERS_AUTH,
-};
-
-// ====== API your app expects ======
-
-/**
- * Load once from JSONBin. Returns { tournaments: [], deleted: [] } shape.
- */
 export async function loadStoreOnce() {
-  try {
-    const res = await fetch(`${BASE}/${BIN_ID}/latest`, { headers: HEADERS_AUTH });
-    if (!res.ok) {
-      console.warn("JSONBin load failed:", res.status, await res.text());
-      return { tournaments: [], deleted: [] };
-    }
-    const json = await res.json();
-    // JSONBin v3 returns { record, metadata }
-    return json?.record ?? { tournaments: [], deleted: [] };
-  } catch (err) {
-    console.warn("JSONBin load error:", err);
-    return { tournaments: [], deleted: [] };
-  }
-}
-
-/**
- * Save whole store to JSONBin (manual Save button in your UI).
- * Overwrites the bin with the provided payload.
- */
-let lastSaveAt = 0;
-export async function saveStore(payload) {
-  const now = Date.now();
-  if (now - lastSaveAt < MIN_SAVE_GAP_MS) {
-    // Avoid accidental double-clicks; not strictly necessary
-    await new Promise((r) => setTimeout(r, MIN_SAVE_GAP_MS - (now - lastSaveAt)));
-  }
-  lastSaveAt = Date.now();
-
-  const res = await fetch(`${BASE}/${BIN_ID}`, {
-    method: "PUT",
-    headers: HEADERS_JSON,
-    body: JSON.stringify(payload ?? { tournaments: [], deleted: [] }),
-  });
-
+  // GET latest record
+  const res = await fetch(`${BASE}/b/${BIN_ID}/latest`, { headers: hdr(false) });
   if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`JSONBin save failed: ${res.status} ${t}`);
+    const txt = await res.text().catch(() => "");
+    throw new Error(`JSONBin load failed: ${res.status} ${txt}`);
   }
-  return true;
+  const data = await res.json();
+  // we store the raw record at root
+  return data?.record || { tournaments: [], deleted: [] };
 }
 
-/**
- * No realtime on JSONBin. We expose a no-op subscription that you can
- * later replace with polling if you want “auto refresh”.
- *
- * Usage in your component:
- *   const unsub = subscribeStore((next) => setState(next));
- *   return () => unsub();
- */
+export async function saveStore(payload) {
+  // PUT replaces the entire record in the bin
+  const res = await fetch(`${BASE}/b/${BIN_ID}`, {
+    method: "PUT",
+    headers: hdr(true),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`JSONBin save failed: ${res.status} ${txt}`);
+  }
+  return res.json();
+}
+
+// JSONBin has no realtime; return a no-op unsubscriber to keep API consistent
 export function subscribeStore(/* cb */) {
-  // If you ever want polling:
-  // const iv = setInterval(async () => {
-  //   const data = await loadStoreOnce();
-  //   cb?.(data);
-  // }, 10000);
-  // return () => clearInterval(iv);
   return () => {};
 }

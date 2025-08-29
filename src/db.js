@@ -1,47 +1,76 @@
 // src/db.js
-// Minimal JSONBin v3 adapter for GitHub Pages (no runtime secrets)
-// Make sure your bin is set to Public. Paste your BIN_ID and X-Master-Key.
+// JSONBin v3 helpers
 
+// ✅ FILL THESE
 const BIN_ID = "68b15f2fd0ea881f4069feab";
 const MASTER_KEY = "$2a$10$.quJq36pp2YHNa/NusCAWeH6b0x3NDiApfkB4fnth7SqLYmH5s6PK"; // starts with "•••" in JSONBin UI
-const BASE = "https://api.jsonbin.io/v3";
 
-function hdr(json = false) {
-  const h = {
-    "X-Master-Key": MASTER_KEY,
-    "X-Bin-Meta": "false",
-  };
-  if (json) h["Content-Type"] = "application/json";
-  return h;
+// If your bin is Public READ, set this to true to omit keys on GET:
+const PUBLIC_READ = true;
+
+const API_BASE = "https://api.jsonbin.io/v3";
+
+// Small helper to add a cache-buster
+function withBust(url) {
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}_=${Date.now()}`;
 }
 
 export async function loadStoreOnce() {
-  // GET latest record
-  const res = await fetch(`${BASE}/b/${BIN_ID}/latest`, { headers: hdr(false) });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`JSONBin load failed: ${res.status} ${txt}`);
-  }
-  const data = await res.json();
-  // we store the raw record at root
-  return data?.record || { tournaments: [], deleted: [] };
-}
+  const url = withBust(`${API_BASE}/b/${BIN_ID}/latest`);
+  const headers = {};
+  if (!PUBLIC_READ) headers["X-Master-Key"] = MASTER_KEY;
 
-export async function saveStore(payload) {
-  // PUT replaces the entire record in the bin
-  const res = await fetch(`${BASE}/b/${BIN_ID}`, {
-    method: "PUT",
-    headers: hdr(true),
-    body: JSON.stringify(payload),
+  const res = await fetch(url, {
+    method: "GET",
+    headers,
+    cache: "no-store",        // 🚫 avoid CDN/browser cache
   });
+
   if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`JSONBin save failed: ${res.status} ${txt}`);
+    const text = await res.text().catch(() => "");
+    throw new Error(`Load failed (${res.status}) ${text}`);
   }
-  return res.json();
+
+  const json = await res.json();
+  // json => {record: {...}, metadata: {...}}
+  const record = json && json.record ? json.record : {};
+  // Normalize shape to what app expects:
+  return {
+    tournaments: Array.isArray(record.tournaments) ? record.tournaments : [],
+    deleted: Array.isArray(record.deleted) ? record.deleted : [],
+  };
 }
 
-// JSONBin has no realtime; return a no-op unsubscriber to keep API consistent
-export function subscribeStore(/* cb */) {
+export async function saveStore(data) {
+  // Ensure we always send the expected shape
+  const payload = {
+    tournaments: Array.isArray(data.tournaments) ? data.tournaments : [],
+    deleted: Array.isArray(data.deleted) ? data.deleted : [],
+  };
+
+  const url = withBust(`${API_BASE}/b/${BIN_ID}`);
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Master-Key": MASTER_KEY,   // write always needs master key
+    },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Save failed (${res.status}) ${text}`);
+  }
+
+  // Optional: you can read the response to confirm version
+  return await res.json();
+}
+
+// Optional: no-op live subscribe placeholder so the app can call it safely.
+export function subscribeStore(_cb) {
+  // JSONBin doesn’t support realtime; return an unsubscribe no-op
   return () => {};
 }

@@ -1,20 +1,14 @@
-// ====== Persistence glue (backend-agnostic) ======
+// src/TournamentMaker.jsx
+// ====== Tournament Maker (GitHub Pages + JSONBin + CDN libs) ======
 import React, { useEffect, useMemo, useState, useRef } from "react";
+import { loadStoreOnce, saveStore, subscribeStore } from "./db";
 
-/* Using CDN globals:
+/* Using CDN globals you added in index.html:
    - window.XLSX          (xlsx.full.min.js)
    - window.html2canvas   (html2canvas.min.js)
    - window.jspdf.jsPDF   (jspdf.umd.min.js)
 */
 /* global XLSX, html2canvas, jspdf */
-
-/**
- * Tournament Maker — Multiple Concurrent Tournaments (TT & Badminton)
- * Dark UI • Tabs: SCHEDULE (admin only), FIXTURES, STANDINGS, WINNERS, DELETED (admin only)
- *
- * Cloud persistence via ./db (e.g., Supabase/JSONBin/etc.)
- * Admin auth: simple in-app username/password (change before sharing)
- */
 
 const TM_BLUE = "#0f4aa1";
 const NEW_TOURNEY_SENTINEL = "__NEW__";
@@ -24,6 +18,7 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 const ADMIN_USERNAME = "admin";
 const ADMIN_PASSWORD = "gameport123";
 
+// ---------- utils ----------
 function normalizeHeader(h) {
   return String(h || "").trim().toLowerCase();
 }
@@ -85,6 +80,7 @@ function timeStr(ts) {
   }
 }
 
+// ---------- small UI bits ----------
 function TabButton({ id, label, tab, setTab }) {
   const active = tab === id;
   return (
@@ -182,10 +178,196 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
   );
 }
 
+// ---------- Export helpers (CDN mode) ----------
+function groupMatchesByRound(tn) {
+  const byRound = new Map();
+  for (const m of tn.matches) {
+    if (!byRound.has(m.round)) byRound.set(m.round, []);
+    byRound.get(m.round).push(m);
+  }
+  return Array.from(byRound.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([round, arr]) => ({ round, matches: arr }));
+}
+function exportTournamentToExcel(tn) {
+  try {
+    const wb = XLSX.utils.book_new();
+    const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
+    const grouped = groupMatchesByRound(tn);
+
+    if (grouped.length === 0) {
+      alert("No matches to export.");
+      return;
+    }
+
+    for (const { round, matches } of grouped) {
+      const data = [["Match #", "Player A", "Player B", "Winner", "Status"]];
+      matches.forEach((m, i) => {
+        const a = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
+        const b = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
+        const w = m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD";
+        data.push([i + 1, a, b, w, m.status || ""]);
+      });
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      XLSX.utils.book_append_sheet(wb, ws, `Round ${round}`);
+    }
+
+    const fname = `${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.xlsx`;
+    XLSX.writeFile(wb, fname);
+  } catch (e) {
+    console.error("Excel export failed:", e);
+    alert("Excel export failed. Check console.");
+  }
+}
+async function exportTournamentToPDF(tn) {
+  const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
+  const grouped = groupMatchesByRound(tn);
+  if (grouped.length === 0) {
+    alert("No matches to export.");
+    return;
+  }
+
+  // Build off-screen bracket
+  const wrap = document.createElement("div");
+  wrap.style.position = "fixed";
+  wrap.style.left = "-99999px";
+  wrap.style.top = "0";
+  wrap.style.width = "2000px";
+  wrap.style.padding = "24px";
+  wrap.style.background = "#0b1120";
+  wrap.style.color = "#fff";
+  wrap.style.fontFamily =
+    "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+
+  const h = document.createElement("div");
+  h.textContent = `${tn.name} — Fixtures`;
+  h.style.fontSize = "28px";
+  h.style.fontWeight = "800";
+  h.style.marginBottom = "18px";
+  wrap.appendChild(h);
+
+  const cols = document.createElement("div");
+  cols.style.display = "flex";
+  cols.style.gap = "18px";
+  cols.style.alignItems = "flex-start";
+  wrap.appendChild(cols);
+
+  const cardStyle = `
+    border:1px solid rgba(255,255,255,.15);
+    border-radius:12px;
+    padding:10px 12px;
+    background: rgba(255,255,255,0.04);
+    min-width: 240px;
+    margin-bottom: 12px;
+  `;
+
+  grouped.forEach(({ round, matches }) => {
+    const col = document.createElement("div");
+    col.style.minWidth = "260px";
+    col.style.maxWidth = "300px";
+
+    const label = document.createElement("div");
+    label.textContent = stageLabelByCount(matches.length) || `Round ${round}`;
+    label.style.fontWeight = "700";
+    label.style.marginBottom = "8px";
+    col.appendChild(label);
+
+    matches.forEach((m, i) => {
+      const a = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
+      const b = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
+      const w = m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD";
+
+      const card = document.createElement("div");
+      card.setAttribute("style", cardStyle);
+
+      const line1 = document.createElement("div");
+      line1.style.display = "flex";
+      line1.style.justifyContent = "space-between";
+      line1.style.fontSize = "12px";
+      line1.style.opacity = ".8";
+      line1.innerHTML = `<span>Match ${i + 1}</span><span>${m.status || ""}</span>`;
+      card.appendChild(line1);
+
+      const aDiv = document.createElement("div");
+      aDiv.style.marginTop = "6px";
+      aDiv.textContent = a;
+      const bDiv = document.createElement("div");
+      bDiv.textContent = b;
+
+      const vs = document.createElement("div");
+      vs.textContent = "vs";
+      vs.style.opacity = ".7";
+      vs.style.fontSize = "12px";
+      vs.style.margin = "2px 0";
+
+      const win = document.createElement("div");
+      win.style.marginTop = "6px";
+      win.innerHTML = `Winner: <b>${w}</b>`;
+
+      card.appendChild(aDiv);
+      if (a && b) card.appendChild(vs);
+      card.appendChild(bDiv);
+      card.appendChild(win);
+
+      col.appendChild(card);
+    });
+
+    cols.appendChild(col);
+  });
+
+  document.body.appendChild(wrap);
+
+  try {
+    const canvas = await window.html2canvas(wrap, {
+      backgroundColor: "#0b1120",
+      scale: 2,
+      useCORS: true,
+    });
+
+    const imgData = canvas.toDataURL("image/png");
+    const pdf = new window.jspdf.jsPDF({
+      orientation: "landscape",
+      unit: "pt",
+      format: "a4",
+    });
+
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const margin = 24;
+    const maxW = pageW - margin * 2;
+    const maxH = pageH - margin * 2;
+
+    const imgW = canvas.width;
+    const imgH = canvas.height;
+    let renderW = maxW;
+    let renderH = (imgH / imgW) * renderW;
+    if (renderH > maxH) {
+      renderH = maxH;
+      renderW = (imgW / imgH) * renderH;
+    }
+
+    pdf.addImage(
+      imgData,
+      "PNG",
+      (pageW - renderW) / 2,
+      (pageH - renderH) / 2,
+      renderW,
+      renderH
+    );
+    pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
+  } catch (e) {
+    console.error("PDF export failed:", e);
+    alert("PDF export failed. Check console.");
+  } finally {
+    document.body.removeChild(wrap);
+  }
+}
+
+// ---------- main component ----------
 export default function TournamentMaker() {
   const [tab, setTab] = useState("fixtures");
 
-  // Admin state (simple in-app auth)
+  // Simple in-app admin auth (localStorage)
   const [isAdmin, setIsAdmin] = useState(() => localStorage.getItem("gp_is_admin") === "1");
   const [showLogin, setShowLogin] = useState(false);
   const [loginId, setLoginId] = useState(""); // admin id
@@ -207,7 +389,7 @@ export default function TournamentMaker() {
   const [deletePw, setDeletePw] = useState("");
   const [deleteTargetId, setDeleteTargetId] = useState(null);
 
-  // ---- Load once; optional live sync commented ----
+  // Load once from JSONBin
   useEffect(() => {
     (async () => {
       try {
@@ -218,12 +400,8 @@ export default function TournamentMaker() {
         console.warn("Load error:", e);
       }
     })();
-    // Optional realtime updates (if your ./db supports it):
-    // const unsubStore = subscribeStore((live) => {
-    //   setTournaments(live.tournaments || []);
-    //   setDeletedTournaments(live.deleted || []);
-    // });
-    // return () => unsubStore && unsubStore();
+    const unsub = subscribeStore?.(() => {}) || (() => {});
+    return () => unsub && unsub();
   }, []);
 
   const builderTeamMap = useMemo(
@@ -490,6 +668,35 @@ export default function TournamentMaker() {
     setTab("fixtures");
   }
 
+  // Permanent delete in DELETED tab
+  function deleteForever(tournamentId) {
+    if (!isAdmin) return alert("Admin only.");
+    const ok = window.confirm(
+      "Permanently delete this tournament from DELETED?\nThis cannot be undone."
+    );
+    if (!ok) return;
+    setDeletedTournaments((prev) => prev.filter((t) => t.id !== tournamentId));
+    // Click top-right Save to persist in JSONBin.
+  }
+
+  // Save to JSONBin
+  const saveAll = async () => {
+    if (!isAdmin) return alert("Admin only.");
+    try {
+      await saveStore({ tournaments, deleted: deletedTournaments });
+      alert("Saved.");
+    } catch (e) {
+      console.error(e);
+      alert("Save failed. Check console.");
+    }
+  };
+
+  // ---------- builder helpers ----------
+  const builderTeamMap = useMemo(
+    () => Object.fromEntries(builderTeams.map((tm) => [tm.name, tm.id])),
+    [builderTeams]
+  );
+
   function applyEntriesToTournament(tournamentId, newNames) {
     if (!isAdmin) return alert("Admin only.");
     setTournaments((prev) =>
@@ -601,9 +808,7 @@ export default function TournamentMaker() {
     );
   }
 
-  const activeTournaments = tournaments.filter((tn) => tn.status === "active");
-  const completedTournaments = tournaments.filter((tn) => tn.status === "completed");
-
+  // ---------- styles ----------
   const gpStyles = `
 @keyframes diagPan { 0% { background-position: 0 0; } 100% { background-position: 400px 400px; } }
 @keyframes floatPan { 0% { transform: translate3d(0,0,0); } 100% { transform: translate3d(-80px,-80px,0); } }
@@ -615,232 +820,7 @@ export default function TournamentMaker() {
 .field { background: rgba(255,255,255,0.05); color: #fff; }
 `;
 
-  // ---- Save (manual Save button) ----
-  const saveAll = async () => {
-    if (!isAdmin) return alert("Admin only.");
-    try {
-      await saveStore({ tournaments, deleted: deletedTournaments });
-      alert("Saved.");
-    } catch (e) {
-      console.error(e);
-      alert("Save failed. Check console.");
-    }
-  };
-
-  function handleLogin(e) {
-    e?.preventDefault?.();
-    if (loginId === ADMIN_USERNAME && loginPw === ADMIN_PASSWORD) {
-      setIsAdmin(true);
-      localStorage.setItem("gp_is_admin", "1");
-      setShowLogin(false);
-      setLoginId("");
-      setLoginPw("");
-    } else {
-      alert("Invalid credentials");
-    }
-  }
-  function handleLogout() {
-    setIsAdmin(false);
-    localStorage.removeItem("gp_is_admin");
-    if (tab === "schedule" || tab === "deleted") setTab("fixtures");
-  }
-function deleteForever(tournamentId) {
-  if (!isAdmin) return alert("Admin only.");
-  const ok = window.confirm(
-    "Permanently delete this tournament from DELETED?\nThis cannot be undone."
-  );
-  if (!ok) return;
-
-  setDeletedTournaments((prev) => prev.filter((t) => t.id !== tournamentId));
-  // Press the top-right "Save" button to persist this change to JSONBin.
-}
-function groupMatchesByRound(tn) {
-  const byRound = new Map();
-  for (const m of tn.matches) {
-    if (!byRound.has(m.round)) byRound.set(m.round, []);
-    byRound.get(m.round).push(m);
-  }
-  return Array.from(byRound.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(([round, arr]) => ({ round, matches: arr }));
-}
-
-/** ---------- EXCEL (XLSX via CDN global) ---------- */
-function exportTournamentToExcel(tn) {
-  try {
-    const wb = XLSX.utils.book_new();
-    const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
-    const grouped = groupMatchesByRound(tn);
-
-    if (grouped.length === 0) {
-      alert("No matches to export.");
-      return;
-    }
-
-    for (const { round, matches } of grouped) {
-      const data = [["Match #", "Player A", "Player B", "Winner", "Status"]];
-      matches.forEach((m, i) => {
-        const a = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
-        const b = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
-        const w = m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD";
-        data.push([i + 1, a, b, w, m.status || ""]);
-      });
-      const ws = XLSX.utils.aoa_to_sheet(data);
-      XLSX.utils.book_append_sheet(wb, ws, `Round ${round}`);
-    }
-
-    const fname = `${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.xlsx`;
-    XLSX.writeFile(wb, fname);
-  } catch (e) {
-    console.error("Excel export failed:", e);
-    alert("Excel export failed. Check console.");
-  }
-}
-
-/** ---------- PDF (jsPDF + html2canvas via CDN globals) ---------- */
-async function exportTournamentToPDF(tn) {
-  const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
-  const grouped = groupMatchesByRound(tn);
-  if (grouped.length === 0) {
-    alert("No matches to export.");
-    return;
-  }
-
-  // Build off-screen bracket
-  const wrap = document.createElement("div");
-  wrap.style.position = "fixed";
-  wrap.style.left = "-99999px";
-  wrap.style.top = "0";
-  wrap.style.width = "2000px"; // wide so columns fit
-  wrap.style.padding = "24px";
-  wrap.style.background = "#0b1120";
-  wrap.style.color = "#fff";
-  wrap.style.fontFamily = "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-
-  const h = document.createElement("div");
-  h.textContent = `${tn.name} — Fixtures`;
-  h.style.fontSize = "28px";
-  h.style.fontWeight = "800";
-  h.style.marginBottom = "18px";
-  wrap.appendChild(h);
-
-  const cols = document.createElement("div");
-  cols.style.display = "flex";
-  cols.style.gap = "18px";
-  cols.style.alignItems = "flex-start";
-  wrap.appendChild(cols);
-
-  const cardStyle = `
-    border:1px solid rgba(255,255,255,.15);
-    border-radius:12px;
-    padding:10px 12px;
-    background: rgba(255,255,255,0.04);
-    min-width: 240px;
-    margin-bottom: 12px;
-  `;
-
-  grouped.forEach(({ round, matches }) => {
-    const col = document.createElement("div");
-    col.style.minWidth = "260px";
-    col.style.maxWidth = "300px";
-
-    const label = document.createElement("div");
-    label.textContent = stageLabelByCount(matches.length) || `Round ${round}`;
-    label.style.fontWeight = "700";
-    label.style.marginBottom = "8px";
-    col.appendChild(label);
-
-    matches.forEach((m, i) => {
-      const a = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
-      const b = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
-      const w = m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD";
-
-      const card = document.createElement("div");
-      card.setAttribute("style", cardStyle);
-
-      const line1 = document.createElement("div");
-      line1.style.display = "flex";
-      line1.style.justifyContent = "space-between";
-      line1.style.fontSize = "12px";
-      line1.style.opacity = ".8";
-      line1.innerHTML = `<span>Match ${i + 1}</span><span>${m.status || ""}</span>`;
-      card.appendChild(line1);
-
-      const aDiv = document.createElement("div");
-      aDiv.style.marginTop = "6px";
-      aDiv.textContent = a;
-      const bDiv = document.createElement("div");
-      bDiv.textContent = b;
-
-      const vs = document.createElement("div");
-      vs.textContent = "vs";
-      vs.style.opacity = ".7";
-      vs.style.fontSize = "12px";
-      vs.style.margin = "2px 0";
-
-      const win = document.createElement("div");
-      win.style.marginTop = "6px";
-      win.innerHTML = `Winner: <b>${w}</b>`;
-
-      card.appendChild(aDiv);
-      if (a && b) card.appendChild(vs);
-      card.appendChild(bDiv);
-      card.appendChild(win);
-
-      col.appendChild(card);
-    });
-
-    cols.appendChild(col);
-  });
-
-  document.body.appendChild(wrap);
-
-  try {
-    const canvas = await window.html2canvas(wrap, {
-      backgroundColor: "#0b1120",
-      scale: 2,
-      useCORS: true,
-    });
-
-    const imgData = canvas.toDataURL("image/png");
-    const pdf = new window.jspdf.jsPDF({
-      orientation: "landscape",
-      unit: "pt",
-      format: "a4",
-    });
-
-    const pageW = pdf.internal.pageSize.getWidth();
-    const pageH = pdf.internal.pageSize.getHeight();
-    const margin = 24;
-    const maxW = pageW - margin * 2;
-    const maxH = pageH - margin * 2;
-
-    const imgW = canvas.width;
-    const imgH = canvas.height;
-    let renderW = maxW;
-    let renderH = (imgH / imgW) * renderW;
-    if (renderH > maxH) {
-      renderH = maxH;
-      renderW = (imgW / imgH) * renderH;
-    }
-
-    pdf.addImage(
-      imgData,
-      "PNG",
-      (pageW - renderW) / 2,
-      (pageH - renderH) / 2,
-      renderW,
-      renderH
-    );
-    pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
-  } catch (e) {
-    console.error("PDF export failed:", e);
-    alert("PDF export failed. Check console.");
-  } finally {
-    document.body.removeChild(wrap);
-  }
-}
-
+  // ---------- render ----------
   return (
     <div className="p-4 text-white min-h-screen pageBg" style={{ position: "relative", zIndex: 1 }}>
       <style>{gpStyles}</style>
@@ -859,7 +839,7 @@ async function exportTournamentToPDF(tn) {
           {isAdmin && <TabButton id="schedule" label="SCHEDULE" tab={tab} setTab={setTab} />}
           <TabButton id="fixtures" label="FIXTURES" tab={tab} setTab={setTab} />
           <TabButton id="standings" label="STANDINGS" tab={tab} setTab={setTab} />
-          <TabButton id="winners" label="WINNERS" tab={tab} setTab={setTab} />
+          <TabButton id="winners" label="WINNERS" tab={tab} setTab={setTab} />}
           {isAdmin && <TabButton id="deleted" label="DELETED" tab={tab} setTab={setTab} />}
         </div>
         <div className="flex gap-2 items-center">
@@ -873,13 +853,18 @@ async function exportTournamentToPDF(tn) {
               Admin Login
             </button>
           ) : (
-            <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={handleLogout}>
+            <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => {
+              setIsAdmin(false);
+              localStorage.removeItem("gp_is_admin");
+              if (tab === "schedule" || tab === "deleted") setTab("fixtures");
+            }}>
               Logout
             </button>
           )}
         </div>
       </div>
 
+      {/* Login Modal */}
       {showLogin && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="w-[90vw] max-w-sm border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
@@ -887,7 +872,18 @@ async function exportTournamentToPDF(tn) {
               <h3 className="font-semibold">Admin Login</h3>
               <button className="w-6 h-6 border border-white rounded text-xs hover:bg-white hover:text-black" onClick={() => setShowLogin(false)}>×</button>
             </div>
-            <form onSubmit={handleLogin} className="space-y-3">
+            <form onSubmit={(e)=> {
+              e.preventDefault();
+              if (loginId === ADMIN_USERNAME && loginPw === ADMIN_PASSWORD) {
+                setIsAdmin(true);
+                localStorage.setItem("gp_is_admin", "1");
+                setShowLogin(false);
+                setLoginId("");
+                setLoginPw("");
+              } else {
+                alert("Invalid credentials");
+              }
+            }} className="space-y-3">
               <div>
                 <label className="text-xs">Admin ID</label>
                 <input className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="enter admin id" />
@@ -903,6 +899,7 @@ async function exportTournamentToPDF(tn) {
         </div>
       )}
 
+      {/* Confirm Delete Modal */}
       {showDeleteModal && isAdmin && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
           <div className="w-[90vw] max-w-md border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
@@ -915,143 +912,148 @@ async function exportTournamentToPDF(tn) {
               <input type="password" className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={deletePw} onChange={(e) => setDeletePw(e.target.value)} placeholder="password" />
             </div>
             <div className="flex gap-2 justify-end">
-              <button className="px-3 py-2 border rounded border-zinc-400 text-zinc-200 hover:bg-zinc-200 hover:text-black" onClick={cancelDelete}>Cancel</button>
+              <button className="px-3 py-2 border rounded border-zinc-400 text-zinc-200 hover:bg-zinc-200 hover:text-black" onClick={() => {
+                setShowDeleteModal(false);
+                setDeleteTargetId(null);
+                setDeletePw("");
+              }}>Cancel</button>
               <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={confirmDelete}>Delete</button>
             </div>
           </div>
         </div>
       )}
 
-      {tab === "schedule" &&
-        (isAdmin ? (
-          <section className="grid md:grid-cols-2 gap-4">
-            <div className="border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
-              <h2 className="font-semibold mb-3">Tournament Setup</h2>
+      {/* SCHEDULE */}
+      {tab === "schedule" && (isAdmin ? (
+        <section className="grid md:grid-cols-2 gap-4">
+          <div className="border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
+            <h2 className="font-semibold mb-3">Tournament Setup</h2>
 
+            <label className="text-xs block mb-3">
+              Tournament
+              <select className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={targetTournamentId} onChange={(e) => setTargetTournamentId(e.target.value)}>
+                <option value={NEW_TOURNEY_SENTINEL}>➕ Create New Tournament</option>
+                {tournaments.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </label>
+
+            {targetTournamentId === NEW_TOURNEY_SENTINEL && (
               <label className="text-xs block mb-3">
-                Tournament
-                <select className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={targetTournamentId} onChange={(e) => setTargetTournamentId(e.target.value)}>
-                  <option value={NEW_TOURNEY_SENTINEL}>➕ Create New Tournament</option>
-                  {tournaments.map((t) => (
-                    <option key={t.id} value={t.id}>{t.name}</option>
-                  ))}
-                </select>
+                Tournament Name
+                <input className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={tName} onChange={(e) => setTName(e.target.value)} placeholder="e.g., Office TT Cup — Aug 2025" />
               </label>
+            )}
 
-              {targetTournamentId === NEW_TOURNEY_SENTINEL && (
-                <label className="text-xs block mb-3">
-                  Tournament Name
-                  <input className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={tName} onChange={(e) => setTName(e.target.value)} placeholder="e.g., Office TT Cup — Aug 2025" />
-                </label>
-              )}
-
-              <label className="text-xs block mb-2">Players (one per line)</label>
-              <textarea className="w-full h-40 field border rounded p-2 mb-2" style={{ borderColor: TM_BLUE }} placeholder={`Enter player names, one per line
+            <label className="text-xs block mb-2">Players (one per line)</label>
+            <textarea className="w-full h-40 field border rounded p-2 mb-2" style={{ borderColor: TM_BLUE }} placeholder={`Enter player names, one per line
 Example:
 Akhil
 Devi
 Rahul
 Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
 
-              <div className="flex items-center justify-between mb-2">
-                <div>
-                  <input ref={uploadRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
-                    onChange={async (e) => {
-                      const f = e.target.files?.[0];
-                      await handlePlayersUpload(f);
-                      if (uploadRef.current) uploadRef.current.value = "";
-                    }}
-                  />
-                  <button
-                    className={`px-3 py-2 border rounded inline-flex items-center gap-2 ${
-                      targetTournamentId !== NEW_TOURNEY_SENTINEL ? "border-zinc-700 text-zinc-500 cursor-not-allowed" : "border-white hover:bg-white hover:text-black"
-                    }`}
-                    title="Upload Entry"
-                    onClick={() => {
-                      if (targetTournamentId === NEW_TOURNEY_SENTINEL && uploadRef.current) uploadRef.current.click();
-                    }}
-                    disabled={targetTournamentId !== NEW_TOURNEY_SENTINEL}
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
-                      <path d="M12 3a1 1 0 0 1 1 1v8.586l2.293-2.293a1 1 0 1 1 1.414 1.414l-4 4a1 1 0 0 1-1.414 0l-4-4A1 1 0 1 1 8.707 10.293L11 12.586V4a1 1 0 0 1 1-1z" />
-                      <path d="M4 15a1 1 0 0 1 1-1h2a1 1 0 1 1 0 2H6v2h12v-2h-1a1 1 0 1 1 0-2h2a1 1 0 0 1 1 1v4z" />
-                    </svg>
-                    <span>Upload Entry</span>
-                  </button>
-                </div>
-
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <input ref={uploadRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    await handlePlayersUpload(f);
+                    if (uploadRef.current) uploadRef.current.value = "";
+                  }}
+                />
                 <button
-                  className="px-3 py-2 border rounded border-white hover:bg-white hover:text-black"
-                  onClick={
-                    targetTournamentId === NEW_TOURNEY_SENTINEL
-                      ? loadTeamsFromText
-                      : () =>
-                          applyEntriesToTournament(
-                            targetTournamentId,
-                            builderTeams.length
-                              ? builderTeams.map((b) => b.name)
-                              : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
-                          )
-                  }
+                  className={`px-3 py-2 border rounded inline-flex items-center gap-2 ${
+                    targetTournamentId !== NEW_TOURNEY_SENTINEL ? "border-zinc-700 text-zinc-500 cursor-not-allowed" : "border-white hover:bg-white hover:text-black"
+                  }`}
+                  title="Upload Entry"
+                  onClick={() => {
+                    if (targetTournamentId === NEW_TOURNEY_SENTINEL && uploadRef.current) uploadRef.current.click();
+                  }}
+                  disabled={targetTournamentId !== NEW_TOURNEY_SENTINEL}
                 >
-                  Add Entries
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+                    <path d="M12 3a1 1 0 0 1 1 1v8.586l2.293-2.293a1 1 0 1 1 1.414 1.414l-4 4a1 1 0 0 1-1.414 0l-4-4A1 1 0 1 1 8.707 10.293L11 12.586V4a1 1 0 0 1 1-1z" />
+                    <path d="M4 15a1 1 0 0 1 1-1h2a1 1 0 1 1 0 2H6v2h12v-2h-1a1 1 0 1 1 0-2h2a1 1 0 0 1 1 1v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z" />
+                  </svg>
+                  <span>Upload Entry</span>
                 </button>
               </div>
 
-              {targetTournamentId === NEW_TOURNEY_SENTINEL && builderTeams.length > 0 && (
-                <div className="my-3 flex gap-4 items-center">
-                  <label className="text-xs">
-                    Seed 1
-                    <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed1} onChange={(e) => setSeed1(e.target.value)}>
-                      <option value="">—</option>
-                      {builderTeams.map((tm) => (
-                        <option key={tm.id} value={tm.name}>{tm.name}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="text-xs">
-                    Seed 2
-                    <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed2} onChange={(e) => setSeed2(e.target.value)}>
-                      <option value="">—</option>
-                      {builderTeams.map((tm) => (
-                        <option key={tm.id} value={tm.name}>{tm.name}</option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-              )}
+              <button
+                className="px-3 py-2 border rounded border-white hover:bg-white hover:text-black"
+                onClick={
+                  targetTournamentId === NEW_TOURNEY_SENTINEL
+                    ? loadTeamsFromText
+                    : () =>
+                        applyEntriesToTournament(
+                          targetTournamentId,
+                          builderTeams.length
+                            ? builderTeams.map((b) => b.name)
+                            : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+                        )
+                }
+              >
+                Add Entries
+              </button>
+            </div>
 
-              <div className="mt-6 text-center">
-                <button className="px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black" onClick={createTournament}>
-                  {targetTournamentId === NEW_TOURNEY_SENTINEL ? "Create Tournament" : "Apply Entries to Selected"}
-                </button>
+            {targetTournamentId === NEW_TOURNEY_SENTINEL && builderTeams.length > 0 && (
+              <div className="my-3 flex gap-4 items-center">
+                <label className="text-xs">
+                  Seed 1
+                  <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed1} onChange={(e) => setSeed1(e.target.value)}>
+                    <option value="">—</option>
+                    {builderTeams.map((tm) => (
+                      <option key={tm.id} value={tm.name}>{tm.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs">
+                  Seed 2
+                  <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed2} onChange={(e) => setSeed2(e.target.value)}>
+                    <option value="">—</option>
+                    {builderTeams.map((tm) => (
+                      <option key={tm.id} value={tm.name}>{tm.name}</option>
+                    ))}
+                  </select>
+                </label>
               </div>
-            </div>
+            )}
 
-            <div className="border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
-              <h2 className="font-semibold mb-3">Tips</h2>
-              <ul className="list-disc ml-5 text-sm text-white/90 space-y-1">
-                <li>Select a tournament or create a new one.</li>
-                <li>For new tournaments: paste or upload names → <b>Add Entries</b> → pick <b>Seed 1</b> &amp; <b>Seed 2</b> → <b>Create Tournament</b>.</li>
-                <li>For existing: paste or load names → <b>Add Entries</b>; we fill Round 1 BYEs first, then add new matches (strict top/bottom alternation in the middle).</li>
-              </ul>
+            <div className="mt-6 text-center">
+              <button className="px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black" onClick={createTournament}>
+                {targetTournamentId === NEW_TOURNEY_SENTINEL ? "Create Tournament" : "Apply Entries to Selected"}
+              </button>
             </div>
-          </section>
-        ) : (
-          <section className="border rounded-2xl p-6 text-sm glass" style={{ borderColor: TM_BLUE }}>
-            Viewer mode. Please <button className="underline" onClick={() => setShowLogin(true)}>login as Admin</button> to access SCHEDULE.
-          </section>
-        ))}
+          </div>
 
+          <div className="border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
+            <h2 className="font-semibold mb-3">Tips</h2>
+            <ul className="list-disc ml-5 text-sm text-white/90 space-y-1">
+              <li>Select a tournament or create a new one.</li>
+              <li>For new tournaments: paste or upload names → <b>Add Entries</b> → pick <b>Seed 1</b> &amp; <b>Seed 2</b> → <b>Create Tournament</b>.</li>
+              <li>For existing: paste or load names → <b>Add Entries</b>; we fill Round 1 BYEs first, then add new matches.</li>
+            </ul>
+          </div>
+        </section>
+      ) : (
+        <section className="border rounded-2xl p-6 text-sm glass" style={{ borderColor: TM_BLUE }}>
+          Viewer mode. Please <button className="underline" onClick={() => setShowLogin(true)}>login as Admin</button> to access SCHEDULE.
+        </section>
+      ))}
+
+      {/* FIXTURES */}
       {tab === "fixtures" && (
         <section>
-          {activeTournaments.length === 0 && (
+          {tournaments.filter((t)=>t.status==="active").length === 0 && (
             <p className="text-white/80 text-sm">
               No active tournaments. {isAdmin ? <>Create one from <b>SCHEDULE</b>.</> : <>Ask an admin to create one.</>}
             </p>
           )}
 
-          {activeTournaments.map((tn) => {
+          {tournaments.filter((t)=>t.status==="active").map((tn) => {
             const mr = maxRound(tn);
             const counts = roundCounts(tn);
             const canNext = canGenerateNext(tn);
@@ -1064,6 +1066,24 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 subtitle={`Active • ${tn.teams.length} players`}
                 right={
                   <div className="flex items-center gap-2">
+                    {/* Export buttons visible to everyone */}
+                    <button
+                      className="px-2 py-1 rounded border hover:bg-white hover:text-black"
+                      style={{ borderColor: TM_BLUE }}
+                      onClick={() => exportTournamentToPDF(tn)}
+                      title="Download fixtures as PDF"
+                    >
+                      Export PDF
+                    </button>
+                    <button
+                      className="px-2 py-1 rounded border hover:bg-white hover:text-black"
+                      style={{ borderColor: TM_BLUE }}
+                      onClick={() => exportTournamentToExcel(tn)}
+                      title="Download fixtures as Excel"
+                    >
+                      Export Excel
+                    </button>
+
                     {isAdmin && (
                       <button className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => openDeleteModal(tn.id)} title="Delete tournament">
                         Delete
@@ -1106,6 +1126,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
+      {/* STANDINGS */}
       {tab === "standings" && (
         <section>
           {tournaments.length === 0 && (
@@ -1162,10 +1183,11 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
+      {/* WINNERS */}
       {tab === "winners" && (
         <section>
-          {completedTournaments.length === 0 && <p className="text-white/80 text-sm">No completed tournaments yet. Finish one in <b>FIXTURES</b>.</p>}
-          {completedTournaments.map((tn) => {
+          {tournaments.filter((t)=>t.status==="completed").length === 0 && <p className="text-white/80 text-sm">No completed tournaments yet. Finish one in <b>FIXTURES</b>.</p>}
+          {tournaments.filter((t)=>t.status==="completed").map((tn) => {
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
             const byRound = new Map();
             for (const m of tn.matches) {
@@ -1215,80 +1237,79 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
-      {tab === "deleted" &&
-        (isAdmin ? (
-          <section>
-            {deletedTournaments.length === 0 ? (
-              <p className="text-white/80 text-sm">No deleted tournaments.</p>
-            ) : (
-              deletedTournaments.map((tn) => {
-                const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
-                const subtitle = `Deleted: ${timeStr(tn.deletedAt)} • Created: ${timeStr(tn.createdAt)} • Players: ${tn.teams.length}`;
-                return (
-                  <Collapsible
-                    key={tn.id}
-                    title={tn.name}
-                    subtitle={subtitle}
-                    right={
-  <div className="flex items-center gap-2">
-    <button
-      className="px-3 py-1 rounded border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
-      onClick={() => restoreTournament(tn.id)}
-      title="Restore to Fixtures"
-    >
-      Restore
-    </button>
-    <button
-      className="px-3 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
-      onClick={() => deleteForever(tn.id)}
-      title="Delete permanently"
-    >
-      Delete Permanently
-    </button>
-  </div>
-}
-
-                    defaultOpen={false}
-                  >
-                    <div className="text-sm space-y-2">
-                      <div>
-                        <b>Status when deleted:</b> {tn.status}
-                        {tn.status === "completed" && tn.championId ? ` • Champion: ${teamMap[tn.championId] || "TBD"}` : ""}
-                      </div>
-                      <div>
-                        <b>Players:</b>
-                        <ul className="list-disc ml-5">
-                          {tn.teams.map((t) => (
-                            <li key={t.id}>{t.name}</li>
-                          ))}
-                        </ul>
-                      </div>
-                      <div>
-                        <b>Matches:</b>
-                        <ul className="list-disc ml-5">
-                          {tn.matches.map((m) => {
-                            const a = teamMap[m.aId] || "BYE/TBD";
-                            const b = teamMap[m.bId] || "BYE/TBD";
-                            const w = m.winnerId ? teamMap[m.winnerId] || "TBD" : "TBD";
-                            return (
-                              <li key={m.id}>
-                                Round {m.round}: {a} vs {b} — Winner: {w}
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      </div>
+      {/* DELETED */}
+      {tab === "deleted" && (isAdmin ? (
+        <section>
+          {deletedTournaments.length === 0 ? (
+            <p className="text-white/80 text-sm">No deleted tournaments.</p>
+          ) : (
+            deletedTournaments.map((tn) => {
+              const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
+              const subtitle = `Deleted: ${timeStr(tn.deletedAt)} • Created: ${timeStr(tn.createdAt)} • Players: ${tn.teams.length}`;
+              return (
+                <Collapsible
+                  key={tn.id}
+                  title={tn.name}
+                  subtitle={subtitle}
+                  right={
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="px-3 py-1 rounded border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
+                        onClick={() => restoreTournament(tn.id)}
+                        title="Restore to Fixtures"
+                      >
+                        Restore
+                      </button>
+                      <button
+                        className="px-3 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
+                        onClick={() => deleteForever(tn.id)}
+                        title="Delete permanently"
+                      >
+                        Delete Permanently
+                      </button>
                     </div>
-                  </Collapsible>
-                );
-              })
-            )}
-          </section>
-        ) : (
-          <section className="border rounded-2xl p-6 text-sm glass" style={{ borderColor: TM_BLUE }}>
-            Viewer mode. Please <button className="underline" onClick={() => setShowLogin(true)}>login as Admin</button> to access DELETED.
-          </section>
-        ))}
+                  }
+                  defaultOpen={false}
+                >
+                  <div className="text-sm space-y-2">
+                    <div>
+                      <b>Status when deleted:</b> {tn.status}
+                      {tn.status === "completed" && tn.championId ? ` • Champion: ${teamMap[tn.championId] || "TBD"}` : ""}
+                    </div>
+                    <div>
+                      <b>Players:</b>
+                      <ul className="list-disc ml-5">
+                        {tn.teams.map((t) => (
+                          <li key={t.id}>{t.name}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <b>Matches:</b>
+                      <ul className="list-disc ml-5">
+                        {tn.matches.map((m) => {
+                          const a = teamMap[m.aId] || "BYE/TBD";
+                          const b = teamMap[m.bId] || "BYE/TBD";
+                          const w = m.winnerId ? teamMap[m.winnerId] || "TBD" : "TBD";
+                          return (
+                            <li key={m.id}>
+                              Round {m.round}: {a} vs {b} — Winner: {w}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  </div>
+                </Collapsible>
+              );
+            })
+          )}
+        </section>
+      ) : (
+        <section className="border rounded-2xl p-6 text-sm glass" style={{ borderColor: TM_BLUE }}>
+          Viewer mode. Please <button className="underline" onClick={() => setShowLogin(true)}>login as Admin</button> to access DELETED.
+        </section>
+      ))}
 
       <footer className="fixed bottom-4 right-6 text-2xl font-bold text-white/80">CV ENGG TML</footer>
     </div>

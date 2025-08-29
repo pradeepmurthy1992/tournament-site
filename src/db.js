@@ -2,7 +2,7 @@
 // Minimal JSONBin v3 adapter for GitHub Pages (no runtime secrets)
 // Make sure your bin is set to Public. Paste your BIN_ID and X-Master-Key.
 
-const BIN_ID = "68b1437543b1c97be92ef960";
+const BIN_ID = "68b15f2fd0ea881f4069feab";
 const MASTER_KEY = "$2a$10$.quJq36pp2YHNa/NusCAWeH6b0x3NDiApfkB4fnth7SqLYmH5s6PK"; // starts with "•••" in JSONBin UI
 const BASE = "https://api.jsonbin.io/v3";
 

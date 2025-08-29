@@ -1,22 +1,24 @@
 import React, { useEffect, useMemo, useState, useRef } from "react";
 import * as XLSX from "xlsx";
 
-// ====== Firebase glue ======
+// ====== Persistence glue (backend-agnostic) ======
 import { loadStoreOnce, saveStore, subscribeStore } from "./db";
-import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
-import "./firebase"; // ensure Firebase is initialized
 
 /**
  * Tournament Maker — Multiple Concurrent Tournaments (TT & Badminton)
  * Dark UI • Tabs: SCHEDULE (admin only), FIXTURES, STANDINGS, WINNERS, DELETED (admin only)
  *
- * Cloud persistence: Firestore
- * Auth: Firebase Email/Password (optional; can run with OPEN rules while testing)
+ * Cloud persistence via ./db (e.g., Supabase/JSONBin/etc.)
+ * Admin auth: simple in-app username/password (change before sharing)
  */
 
 const TM_BLUE = "#0f4aa1";
 const NEW_TOURNEY_SENTINEL = "__NEW__";
 const uid = () => Math.random().toString(36).slice(2, 9);
+
+// ⚠️ Change before sharing
+const ADMIN_USERNAME = "admin";
+const ADMIN_PASSWORD = "gameport123";
 
 function normalizeHeader(h) {
   return String(h || "").trim().toLowerCase();
@@ -177,14 +179,12 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
 }
 
 export default function TournamentMaker() {
-  const auth = getAuth();
-
   const [tab, setTab] = useState("fixtures");
 
-  // Admin state from Firebase Auth
-  const [isAdmin, setIsAdmin] = useState(false);
+  // Admin state (simple in-app auth)
+  const [isAdmin, setIsAdmin] = useState(() => localStorage.getItem("gp_is_admin") === "1");
   const [showLogin, setShowLogin] = useState(false);
-  const [loginId, setLoginId] = useState(""); // email
+  const [loginId, setLoginId] = useState(""); // admin id
   const [loginPw, setLoginPw] = useState("");
 
   const [tName, setTName] = useState("");
@@ -200,11 +200,10 @@ export default function TournamentMaker() {
   const [deletedTournaments, setDeletedTournaments] = useState(() => []);
 
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [deleteEmail, setDeleteEmail] = useState("");
   const [deletePw, setDeletePw] = useState("");
   const [deleteTargetId, setDeleteTargetId] = useState(null);
 
-  // ---- Load from Firestore once; optional live sync commented ----
+  // ---- Load once; optional live sync commented ----
   useEffect(() => {
     (async () => {
       try {
@@ -212,29 +211,16 @@ export default function TournamentMaker() {
         setTournaments(Array.isArray(data.tournaments) ? data.tournaments : []);
         setDeletedTournaments(Array.isArray(data.deleted) ? data.deleted : []);
       } catch (e) {
-        console.warn("Firestore load error:", e);
+        console.warn("Load error:", e);
       }
     })();
-    // Optional realtime updates:
+    // Optional realtime updates (if your ./db supports it):
     // const unsubStore = subscribeStore((live) => {
     //   setTournaments(live.tournaments || []);
     //   setDeletedTournaments(live.deleted || []);
     // });
     // return () => unsubStore && unsubStore();
   }, []);
-
-  // ---- Auth state listener ----
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (user) => {
-      if (user) {
-        setIsAdmin(true);
-      } else {
-        setIsAdmin(false);
-        if (tab === "schedule" || tab === "deleted") setTab("fixtures");
-      }
-    });
-    return () => unsub();
-  }, [auth, tab]);
 
   const builderTeamMap = useMemo(
     () => Object.fromEntries(builderTeams.map((tm) => [tm.name, tm.id])),
@@ -454,23 +440,12 @@ export default function TournamentMaker() {
   function openDeleteModal(tournamentId) {
     if (!isAdmin) return alert("Admin only.");
     setDeleteTargetId(tournamentId);
-    setDeleteEmail("");
     setDeletePw("");
     setShowDeleteModal(true);
   }
-  async function confirmDelete() {
+  function confirmDelete() {
     if (!isAdmin) return;
-    // Re-authenticate by asking email+password again (safer than trusting existing session)
-    try {
-      if (!deleteEmail || !deletePw) {
-        alert("Please enter your admin email and password.");
-        return;
-      }
-      await signInWithEmailAndPassword(getAuth(), deleteEmail, deletePw);
-    } catch (e) {
-      alert("Re-authentication failed. Check email/password.");
-      return;
-    }
+    if (deletePw !== ADMIN_PASSWORD) return alert("Incorrect password.");
     const ok = window.confirm?.(
       "Are you sure you want to delete this tournament?\nIt will be moved to the DELETED tab (not permanently erased)."
     );
@@ -488,13 +463,11 @@ export default function TournamentMaker() {
 
     setShowDeleteModal(false);
     setDeleteTargetId(null);
-    setDeleteEmail("");
     setDeletePw("");
   }
   function cancelDelete() {
     setShowDeleteModal(false);
     setDeleteTargetId(null);
-    setDeleteEmail("");
     setDeletePw("");
   }
 
@@ -638,36 +611,34 @@ export default function TournamentMaker() {
 .field { background: rgba(255,255,255,0.05); color: #fff; }
 `;
 
-  // ---- Save to Firestore (manual Save button) ----
+  // ---- Save (manual Save button) ----
   const saveAll = async () => {
     if (!isAdmin) return alert("Admin only.");
     try {
       await saveStore({ tournaments, deleted: deletedTournaments });
-      alert("Saved to cloud.");
+      alert("Saved.");
     } catch (e) {
       console.error(e);
       alert("Save failed. Check console.");
     }
   };
 
-  async function handleLogin(e) {
+  function handleLogin(e) {
     e?.preventDefault?.();
-    try {
-      await signInWithEmailAndPassword(getAuth(), loginId, loginPw); // loginId = email
+    if (loginId === ADMIN_USERNAME && loginPw === ADMIN_PASSWORD) {
+      setIsAdmin(true);
+      localStorage.setItem("gp_is_admin", "1");
       setShowLogin(false);
       setLoginId("");
       setLoginPw("");
-    } catch (err) {
-      console.error(err);
-      alert("Login failed. Check email/password.");
+    } else {
+      alert("Invalid credentials");
     }
   }
-  async function handleLogout() {
-    try {
-      await signOut(getAuth());
-    } catch (e) {
-      console.error(e);
-    }
+  function handleLogout() {
+    setIsAdmin(false);
+    localStorage.removeItem("gp_is_admin");
+    if (tab === "schedule" || tab === "deleted") setTab("fixtures");
   }
 
   return (
@@ -718,15 +689,15 @@ export default function TournamentMaker() {
             </div>
             <form onSubmit={handleLogin} className="space-y-3">
               <div>
-                <label className="text-xs">Email</label>
-                <input className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="admin@example.com" />
+                <label className="text-xs">Admin ID</label>
+                <input className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="enter admin id" />
               </div>
               <div>
                 <label className="text-xs">Password</label>
                 <input type="password" className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={loginPw} onChange={(e) => setLoginPw(e.target.value)} placeholder="password" />
               </div>
               <button type="submit" className="w-full px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black">Login</button>
-              <p className="text-xs text-white/60">Enable Email/Password in Firebase Auth and create your admin user in console.</p>
+              <p className="text-xs text-white/60">(Change admin ID & password in code before publishing.)</p>
             </form>
           </div>
         </div>
@@ -737,12 +708,8 @@ export default function TournamentMaker() {
           <div className="w-[90vw] max-w-md border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
             <h3 className="font-semibold mb-2">Confirm Delete</h3>
             <p className="text-sm text-white/80 mb-3">
-              Re-enter your admin <b>email</b> and <b>password</b> to delete. It will be moved to the <b>DELETED</b> tab (not permanently erased).
+              Re-enter your admin <b>password</b> to delete. It will be moved to the <b>DELETED</b> tab (not permanently erased).
             </p>
-            <div className="mb-2">
-              <label className="text-xs">Admin Email</label>
-              <input type="email" className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={deleteEmail} onChange={(e) => setDeleteEmail(e.target.value)} placeholder="admin@example.com" />
-            </div>
             <div className="mb-3">
               <label className="text-xs">Admin Password</label>
               <input type="password" className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={deletePw} onChange={(e) => setDeletePw(e.target.value)} placeholder="password" />
@@ -807,7 +774,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
                       <path d="M12 3a1 1 0 0 1 1 1v8.586l2.293-2.293a1 1 0 1 1 1.414 1.414l-4 4a1 1 0 0 1-1.414 0l-4-4A1 1 0 1 1 8.707 10.293L11 12.586V4a1 1 0 0 1 1-1z" />
-                      <path d="M4 15a1 1 0 0 1 1-1h2a1 1 0 1 1 0 2H6v2h12v-2h-1a1 1 0 1 1 0-2h2a1 1 0 0 1 1 1v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z" />
+                      <path d="M4 15a1 1 0 0 1 1-1h2a1 1 0 1 1 0 2H6v2h12v-2h-1a1 1 0 1 1 0-2h2a1 1 0 0 1 1 1v4z" />
                     </svg>
                     <span>Upload Entry</span>
                   </button>

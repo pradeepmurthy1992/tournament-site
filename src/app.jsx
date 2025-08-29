@@ -144,45 +144,41 @@ function exportTournamentToExcel(tn) {
 // ---------- Export: PDF ----------
 // ---------- Export: PDF (canvas-drawn bracket with connector lines incl. Champion) ----------
 // ---------- Export: PDF (full bracket with connector lines + placeholders) ----------
+// ---------- Export: PDF (full bracket with connector lines + placeholders) ----------
 async function exportTournamentToPDF(tn) {
   const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
 
-  // Group actual matches you already have
-  const groupedReal = groupMatchesByRound(tn); // [{round, matches}]
+  const groupedReal = groupMatchesByRound(tn);
   if (!groupedReal.length) return alert("No matches to export.");
 
-  // ----- Work out full bracket size (ensure all future rounds exist virtually) -----
-  const round1Count = groupedReal[0].matches.length;     // #matches in round 1
-  const slots = Math.max(2, round1Count * 2);            // player slots
+  const round1Count = groupedReal[0].matches.length;
+  const slots = Math.max(2, round1Count * 2);
   const totalRounds = Math.max(1, Math.round(Math.log2(slots)));
 
-  // Build "allRounds": real rounds if present, otherwise virtual (future) rounds
   const realByNum = new Map(groupedReal.map(({ round, matches }) => [round, matches]));
   const allRounds = [];
   for (let ri = 0; ri < totalRounds; ri++) {
     const roundNum = ri + 1;
-    const count = Math.max(1, round1Count >> ri); // #matches this round
+    const count = Math.max(1, round1Count >> ri);
     const real = realByNum.get(roundNum);
-    if (real) {
-      allRounds.push({ round: roundNum, matches: real });
-    } else {
-      // Virtual matches for future rounds (empty shells)
-      allRounds.push({
-        round: roundNum,
-        matches: Array.from({ length: count }, (_, i) => ({
-          id: `virtual-${roundNum}-${i}`,
-          round: roundNum,
-          aId: null,
-          bId: null,
-          status: "TBD",
-          winnerId: null,
-          __virtual: true,
-        })),
-      });
-    }
+    allRounds.push(
+      real
+        ? { round: roundNum, matches: real }
+        : {
+            round: roundNum,
+            matches: Array.from({ length: count }, (_, i) => ({
+              id: `virtual-${roundNum}-${i}`,
+              round: roundNum,
+              aId: null,
+              bId: null,
+              status: "TBD",
+              winnerId: null,
+              __virtual: true,
+            })),
+          }
+    );
   }
 
-  // ----- Label helpers -----
   const stageShort = (count) => {
     if (count === 1) return "F";
     if (count === 2) return "SF";
@@ -190,43 +186,32 @@ async function exportTournamentToPDF(tn) {
     if (count === 8) return "R16";
     if (count === 16) return "R32";
     if (count === 32) return "R64";
-    return `R${count * 2}`; // generic (e.g., R128)
+    return `R${count * 2}`;
   };
   const stageLong = (count) => stageLabelByCount(count) || `Round of ${count * 2}`;
 
-  // For placeholders like "Winner of QF1"
-  function winnerOfLabel(prevRoundMatchCount, prevMatchIndex /* 0-based */) {
+  function winnerOfLabel(prevRoundMatchCount, prevMatchIndex) {
     const tag = stageShort(prevRoundMatchCount);
     return `Winner of ${tag}${prevMatchIndex + 1}`;
   }
-
-  // Prefer actual participant → else if previous-round winner known → else placeholder
   function nameForSlot(ri, mi, side) {
     const currRound = allRounds[ri];
     const m = currRound.matches[mi];
-
-    // 1) If current match already has IDs (real rounds), use them
     const id = side === "A" ? m.aId : m.bId;
     if (id) return teamMap[id] || "Unknown";
 
-    // 2) If previous round exists, and its winner is known, use that winner's name
     if (ri > 0) {
       const prevRound = allRounds[ri - 1];
-      const prevCount = prevRound.matches.length;      // e.g., 4 => QF
-      const prevIdx = side === "A" ? mi * 2 : mi * 2 + 1; // child indices
+      const prevCount = prevRound.matches.length;
+      const prevIdx = side === "A" ? mi * 2 : mi * 2 + 1;
       const prevM = prevRound.matches[prevIdx];
       if (prevM) {
         if (prevM.winnerId) return teamMap[prevM.winnerId] || "TBD";
-        // 3) Otherwise placeholder
         return winnerOfLabel(prevCount, prevIdx);
       }
     }
-
-    // 4) If no previous round (shouldn’t happen for side names in R1), fallback
-    return side === "A" ? "BYE/TBD" : "BYE/TBD";
+    return "BYE/TBD";
   }
-
-  // Status + Winner as text with TBD defaults
   function statusText(m) {
     if (m.status && String(m.status).trim()) return m.status;
     const bothEmpty = !m.aId && !m.bId;
@@ -239,7 +224,7 @@ async function exportTournamentToPDF(tn) {
     return m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD";
   }
 
-  // ----- Canvas layout (no overlap, lots of breathing room) -----
+  // ----- Layout constants -----
   const margin = 28;
   const headerH = 60;
 
@@ -247,20 +232,35 @@ async function exportTournamentToPDF(tn) {
   const boxW = 240;
   const boxH = 78;
   const innerPad = 10;
-  const elbowGapX = 22; // horizontal elbow before connector verticals
+  const elbowGapX = 22;
   const radius = 12;
 
-  const slot0 = Math.max(120, boxH + 36); // base spacing for R1; doubles every round
+  const slot0 = Math.max(120, boxH + 36); // base vertical spacing in Round 1
 
-  const canvasW = margin * 2 + colWidth * totalRounds + 200; // extra for Champion at the end
-  const canvasH = margin * 2 + headerH + Math.max(boxH, allRounds[0].matches.length * slot0);
+  // Coordinate helpers
+  const roundX = (ri) => margin + ri * colWidth;
+  const roundSlot = (ri) => slot0 * Math.pow(2, ri);
+  const roundY = (ri, mi) => margin + headerH + mi * roundSlot(ri) + (roundSlot(ri) - boxH) / 2;
 
+  // >>> FIX: compute exact canvas height based on ALL rounds/matches <<<
+  let neededMaxY = margin + headerH + boxH; // minimum
+  for (let ri = 0; ri < allRounds.length; ri++) {
+    const count = allRounds[ri].matches.length;
+    for (let mi = 0; mi < count; mi++) {
+      const y = roundY(ri, mi);
+      neededMaxY = Math.max(neededMaxY, y + boxH);
+    }
+  }
+  const canvasW = margin * 2 + colWidth * totalRounds + 200; // extra for Champion
+  const canvasH = Math.ceil(neededMaxY + margin + 16);       // bottom breathing room
+
+  // Create canvas
   const canvas = document.createElement("canvas");
   canvas.width = canvasW;
   canvas.height = canvasH;
   const ctx = canvas.getContext("2d");
 
-  // BG
+  // Background
   ctx.fillStyle = "#0b1120";
   ctx.fillRect(0, 0, canvasW, canvasH);
 
@@ -273,19 +273,14 @@ async function exportTournamentToPDF(tn) {
   // Subtle guide lines
   ctx.strokeStyle = "rgba(255,255,255,0.06)";
   ctx.lineWidth = 1;
-  for (let y = margin + headerH; y < canvasH - margin; y += 48) {
+  for (let y = margin + headerH; y <= canvasH - margin - 1; y += 48) {
     ctx.beginPath();
     ctx.moveTo(margin, y);
     ctx.lineTo(canvasW - margin, y);
     ctx.stroke();
   }
 
-  // coords helpers
-  const roundX = (ri) => margin + ri * colWidth;
-  const roundSlot = (ri) => slot0 * Math.pow(2, ri);
-  const roundY = (ri, mi) => margin + headerH + mi * roundSlot(ri) + (roundSlot(ri) - boxH) / 2;
-
-  // truncate text to fit
+  // Drawing helpers
   function ellipsize(text, maxPx, font) {
     ctx.save();
     ctx.font = font;
@@ -300,7 +295,6 @@ async function exportTournamentToPDF(tn) {
     ctx.restore();
     return s + "…";
   }
-
   function roundedRect(x, y, w, h, r) {
     ctx.beginPath();
     ctx.moveTo(x + r, y);
@@ -314,10 +308,7 @@ async function exportTournamentToPDF(tn) {
     ctx.quadraticCurveTo(x, y, x + r, y);
     ctx.closePath();
   }
-
-  // Draw one match card
   function drawMatchCard(x, y, w, h, titleLeft, titleRight, line2Left, line2Right) {
-    // card bg
     ctx.fillStyle = "rgba(255,255,255,0.06)";
     roundedRect(x, y, w, h, radius);
     ctx.fill();
@@ -326,7 +317,6 @@ async function exportTournamentToPDF(tn) {
 
     const textMax = w - innerPad * 2;
 
-    // Header row
     ctx.font = "600 12px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
     ctx.fillStyle = "rgba(255,255,255,0.85)";
     ctx.textBaseline = "top";
@@ -336,76 +326,61 @@ async function exportTournamentToPDF(tn) {
     const rW = ctx.measureText(r).width;
     ctx.fillText(r, x + w - innerPad - rW, y + innerPad);
 
-    // Player A
     ctx.font = "bold 14px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
     ctx.fillStyle = "#ffffff";
-    const a = ellipsize(line2Left, textMax, ctx.font);
-    ctx.fillText(a, x + innerPad, y + innerPad + 16);
+    ctx.fillText(ellipsize(line2Left, textMax, ctx.font), x + innerPad, y + innerPad + 16);
 
-    // small vs
     ctx.font = "12px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
     ctx.fillStyle = "rgba(255,255,255,0.75)";
     ctx.fillText("vs", x + innerPad, y + innerPad + 34);
 
-    // Player B
     ctx.font = "bold 14px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
     ctx.fillStyle = "#ffffff";
-    const b = ellipsize(line2Right, textMax, ctx.font);
-    ctx.fillText(b, x + innerPad + 24, y + innerPad + 32);
+    ctx.fillText(ellipsize(line2Right, textMax, ctx.font), x + innerPad + 24, y + innerPad + 32);
 
-    // Winner row
-    ctx.font = "12px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "rgba(255,255,255,0.9)";
     const winnerY = y + h - innerPad - 14;
-    // The "winner" line is drawn by caller
     return { winnerY };
   }
 
-  // Draw rounds + cards
+  // Draw rounds
   for (let ri = 0; ri < allRounds.length; ri++) {
     const thisRound = allRounds[ri];
     const count = thisRound.matches.length;
-    const label = stageLong(count); // e.g., QF -> "Quarter Finals"
+    const label = stageLong(count);
 
-    // Round label
     ctx.font = "700 14px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
     ctx.fillStyle = "rgba(255,255,255,0.9)";
     ctx.fillText(label, roundX(ri), margin + headerH - 24);
 
     for (let mi = 0; mi < count; mi++) {
       const m = thisRound.matches[mi];
-
       const x = roundX(ri) + 8;
       const y = roundY(ri, mi);
+
       const s = statusText(m);
       const aName = nameForSlot(ri, mi, "A");
       const bName = nameForSlot(ri, mi, "B");
       const wName = winnerText(m);
 
-      // header left/right: "Match # • Status"
       const titleLeft = `M${mi + 1}`;
       const titleRight = `Status: ${s}`;
 
       const { winnerY } = drawMatchCard(x, y, boxW, boxH, titleLeft, titleRight, aName, bName);
-      // Winner line
+
       ctx.fillStyle = "rgba(255,255,255,0.9)";
       ctx.font = "12px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
       ctx.fillText(`Winner: ${ellipsize(wName, boxW - innerPad * 2, ctx.font)}`, x + innerPad, winnerY);
 
-      // Connect to next round (if any)
+      // connectors
       if (ri < allRounds.length - 1) {
         const nextX = roundX(ri + 1) + 8;
-        const nextSlotH = roundSlot(ri + 1);
         const parentY = roundY(ri + 1, Math.floor(mi / 2)) + boxH / 2;
 
-        // child right mid
         const childMidX = x + boxW;
         const childMidY = y + boxH / 2;
 
         ctx.strokeStyle = "rgba(255,255,255,0.35)";
         ctx.lineWidth = 2;
-
-        // elbow: horizontal out, vertical up/down, horizontal into parent
         ctx.beginPath();
         ctx.moveTo(childMidX, childMidY);
         ctx.lineTo(childMidX + elbowGapX, childMidY);
@@ -416,13 +391,12 @@ async function exportTournamentToPDF(tn) {
     }
   }
 
-  // Champion box (if completed)
+  // Champion block
   const lastRound = allRounds[allRounds.length - 1];
   const champ = lastRound.matches[0] && lastRound.matches[0].winnerId
     ? (teamMap[lastRound.matches[0].winnerId] || "TBD")
     : "TBD";
 
-  // Champion label area
   const champX = roundX(allRounds.length - 1) + colWidth;
   const champY = roundY(allRounds.length - 1, 0) - 6;
 
@@ -430,7 +404,6 @@ async function exportTournamentToPDF(tn) {
   ctx.fillStyle = "rgba(255,255,255,0.9)";
   ctx.fillText("Champion", champX, champY);
 
-  // Champ box
   const cW = 180, cH = 60;
   ctx.fillStyle = "rgba(0,255,160,0.12)";
   roundedRect(champX, champY + 10, cW, cH, 12);
@@ -442,7 +415,7 @@ async function exportTournamentToPDF(tn) {
   ctx.fillStyle = "#ffffff";
   ctx.fillText(ellipsize(champ, cW - 16, ctx.font), champX + 8, champY + 10 + (cH - 16) / 2 - 4);
 
-  // ----- Download as PDF (single page; downsizes to A4 landscape cleanly) -----
+  // Export to PDF
   try {
     const img = canvas.toDataURL("image/png");
     const pdf = new window.jspdf.jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
@@ -467,6 +440,7 @@ async function exportTournamentToPDF(tn) {
     alert("PDF export failed. Check console.");
   }
 }
+
 
 
 // ---------- UI bits ----------

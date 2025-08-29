@@ -154,15 +154,7 @@ function exportTournamentToExcel(tn) {
 // ---- Bracket helpers (add once, near your other helpers) ----
 function nextPow2(n){ let p=1; while(p<n) p*=2; return p; }
 
-function stageShort(count) {
-  if (count === 1) return "F";
-  if (count === 2) return "SF";
-  if (count === 4) return "QF";
-  if (count === 8) return "R16";
-  if (count === 16) return "R32";
-  if (count === 32) return "R64";
-  return `R${count * 2}`;
-}
+
 
 /** Build a full (projected) bracket up to Finals, padding with placeholders */
 function buildProjectedRounds(tn) {

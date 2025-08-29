@@ -1,23 +1,30 @@
 // src/db.js
-import { db } from "./firebase";
-import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
-
-// Store everything in one doc: collection "gameport", doc "store"
-const STORE_DOC = doc(db, "gameport", "store");
+const BIN_ID = "YOUR_BIN_ID";
+const API_KEY = "YOUR_JSONBIN_API_KEY";
+const BASE = "https://api.jsonbin.io/v3/b";
 
 export async function loadStoreOnce() {
-  const snap = await getDoc(STORE_DOC);
-  return snap.exists() ? snap.data() : { tournaments: [], deleted: [] };
-}
-
-export async function saveStore(data) {
-  // data: { tournaments: [...], deleted: [...] }
-  await setDoc(STORE_DOC, data, { merge: false });
-}
-
-export function subscribeStore(cb) {
-  // Optional realtime sync; cb gets { tournaments, deleted }
-  return onSnapshot(STORE_DOC, (snap) => {
-    if (snap.exists()) cb(snap.data());
+  const res = await fetch(`${BASE}/${BIN_ID}/latest`, {
+    headers: { "X-Master-Key": API_KEY }
   });
+  if (!res.ok) return { tournaments: [], deleted: [] };
+  const json = await res.json();
+  return json?.record ?? { tournaments: [], deleted: [] };
+}
+
+export async function saveStore(payload) {
+  const res = await fetch(`${BASE}/${BIN_ID}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Master-Key": API_KEY
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error("Save failed");
+}
+
+// No realtime on JSONBin; provide a no-op
+export function subscribeStore() {
+  return () => {};
 }

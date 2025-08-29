@@ -1,8 +1,12 @@
-import React, { useEffect, useMemo, useState, useRef } from "react";
-import * as XLSX from "xlsx";
-
 // ====== Persistence glue (backend-agnostic) ======
-import { loadStoreOnce, saveStore, subscribeStore } from "./db";
+import React, { useEffect, useMemo, useState, useRef } from "react";
+
+/* Using CDN globals:
+   - window.XLSX          (xlsx.full.min.js)
+   - window.html2canvas   (html2canvas.min.js)
+   - window.jspdf.jsPDF   (jspdf.umd.min.js)
+*/
+/* global XLSX, html2canvas, jspdf */
 
 /**
  * Tournament Maker — Multiple Concurrent Tournaments (TT & Badminton)
@@ -649,6 +653,192 @@ function deleteForever(tournamentId) {
 
   setDeletedTournaments((prev) => prev.filter((t) => t.id !== tournamentId));
   // Press the top-right "Save" button to persist this change to JSONBin.
+}
+function groupMatchesByRound(tn) {
+  const byRound = new Map();
+  for (const m of tn.matches) {
+    if (!byRound.has(m.round)) byRound.set(m.round, []);
+    byRound.get(m.round).push(m);
+  }
+  return Array.from(byRound.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([round, arr]) => ({ round, matches: arr }));
+}
+
+/** ---------- EXCEL (XLSX via CDN global) ---------- */
+function exportTournamentToExcel(tn) {
+  try {
+    const wb = XLSX.utils.book_new();
+    const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
+    const grouped = groupMatchesByRound(tn);
+
+    if (grouped.length === 0) {
+      alert("No matches to export.");
+      return;
+    }
+
+    for (const { round, matches } of grouped) {
+      const data = [["Match #", "Player A", "Player B", "Winner", "Status"]];
+      matches.forEach((m, i) => {
+        const a = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
+        const b = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
+        const w = m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD";
+        data.push([i + 1, a, b, w, m.status || ""]);
+      });
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      XLSX.utils.book_append_sheet(wb, ws, `Round ${round}`);
+    }
+
+    const fname = `${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.xlsx`;
+    XLSX.writeFile(wb, fname);
+  } catch (e) {
+    console.error("Excel export failed:", e);
+    alert("Excel export failed. Check console.");
+  }
+}
+
+/** ---------- PDF (jsPDF + html2canvas via CDN globals) ---------- */
+async function exportTournamentToPDF(tn) {
+  const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
+  const grouped = groupMatchesByRound(tn);
+  if (grouped.length === 0) {
+    alert("No matches to export.");
+    return;
+  }
+
+  // Build off-screen bracket
+  const wrap = document.createElement("div");
+  wrap.style.position = "fixed";
+  wrap.style.left = "-99999px";
+  wrap.style.top = "0";
+  wrap.style.width = "2000px"; // wide so columns fit
+  wrap.style.padding = "24px";
+  wrap.style.background = "#0b1120";
+  wrap.style.color = "#fff";
+  wrap.style.fontFamily = "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+
+  const h = document.createElement("div");
+  h.textContent = `${tn.name} — Fixtures`;
+  h.style.fontSize = "28px";
+  h.style.fontWeight = "800";
+  h.style.marginBottom = "18px";
+  wrap.appendChild(h);
+
+  const cols = document.createElement("div");
+  cols.style.display = "flex";
+  cols.style.gap = "18px";
+  cols.style.alignItems = "flex-start";
+  wrap.appendChild(cols);
+
+  const cardStyle = `
+    border:1px solid rgba(255,255,255,.15);
+    border-radius:12px;
+    padding:10px 12px;
+    background: rgba(255,255,255,0.04);
+    min-width: 240px;
+    margin-bottom: 12px;
+  `;
+
+  grouped.forEach(({ round, matches }) => {
+    const col = document.createElement("div");
+    col.style.minWidth = "260px";
+    col.style.maxWidth = "300px";
+
+    const label = document.createElement("div");
+    label.textContent = stageLabelByCount(matches.length) || `Round ${round}`;
+    label.style.fontWeight = "700";
+    label.style.marginBottom = "8px";
+    col.appendChild(label);
+
+    matches.forEach((m, i) => {
+      const a = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
+      const b = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
+      const w = m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD";
+
+      const card = document.createElement("div");
+      card.setAttribute("style", cardStyle);
+
+      const line1 = document.createElement("div");
+      line1.style.display = "flex";
+      line1.style.justifyContent = "space-between";
+      line1.style.fontSize = "12px";
+      line1.style.opacity = ".8";
+      line1.innerHTML = `<span>Match ${i + 1}</span><span>${m.status || ""}</span>`;
+      card.appendChild(line1);
+
+      const aDiv = document.createElement("div");
+      aDiv.style.marginTop = "6px";
+      aDiv.textContent = a;
+      const bDiv = document.createElement("div");
+      bDiv.textContent = b;
+
+      const vs = document.createElement("div");
+      vs.textContent = "vs";
+      vs.style.opacity = ".7";
+      vs.style.fontSize = "12px";
+      vs.style.margin = "2px 0";
+
+      const win = document.createElement("div");
+      win.style.marginTop = "6px";
+      win.innerHTML = `Winner: <b>${w}</b>`;
+
+      card.appendChild(aDiv);
+      if (a && b) card.appendChild(vs);
+      card.appendChild(bDiv);
+      card.appendChild(win);
+
+      col.appendChild(card);
+    });
+
+    cols.appendChild(col);
+  });
+
+  document.body.appendChild(wrap);
+
+  try {
+    const canvas = await window.html2canvas(wrap, {
+      backgroundColor: "#0b1120",
+      scale: 2,
+      useCORS: true,
+    });
+
+    const imgData = canvas.toDataURL("image/png");
+    const pdf = new window.jspdf.jsPDF({
+      orientation: "landscape",
+      unit: "pt",
+      format: "a4",
+    });
+
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const margin = 24;
+    const maxW = pageW - margin * 2;
+    const maxH = pageH - margin * 2;
+
+    const imgW = canvas.width;
+    const imgH = canvas.height;
+    let renderW = maxW;
+    let renderH = (imgH / imgW) * renderW;
+    if (renderH > maxH) {
+      renderH = maxH;
+      renderW = (imgW / imgH) * renderH;
+    }
+
+    pdf.addImage(
+      imgData,
+      "PNG",
+      (pageW - renderW) / 2,
+      (pageH - renderH) / 2,
+      renderW,
+      renderH
+    );
+    pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
+  } catch (e) {
+    console.error("PDF export failed:", e);
+    alert("PDF export failed. Check console.");
+  } finally {
+    document.body.removeChild(wrap);
+  }
 }
 
   return (

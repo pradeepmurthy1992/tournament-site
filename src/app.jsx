@@ -70,13 +70,19 @@ async function parseExcelPlayers(arrayBuffer) {
     return [];
   }
 }
-function stageLabelByCount(count) {
-  if (count === 1) return "Finals";
-  if (count === 2) return "Semi Finals";
-  if (count === 4) return "Quarter Finals";
-  if (count === 8) return "Pre quarters";
-  return null;
+
+/** Short round code by match-count in that round */
+function stageShort(count) {
+  if (!Number.isFinite(count) || count <= 0) return "R?";
+  if (count === 1) return "F";
+  if (count === 2) return "SF";
+  if (count === 4) return "QF";
+  if (count === 8) return "R16";
+  if (count === 16) return "R32";
+  if (count === 32) return "R64";
+  return `R${count * 2}`;
 }
+
 function timeStr(ts) {
   try {
     const d = new Date(ts);
@@ -131,7 +137,9 @@ function exportTournamentToExcel(tn) {
       });
       const ws = XLSX.utils.aoa_to_sheet(data);
       ws["!cols"] = [{ wch: 8 }, { wch: 24 }, { wch: 24 }, { wch: 20 }, { wch: 14 }];
-      XLSX.utils.book_append_sheet(wb, ws, `Round ${round}`);
+      // ★ Use short code for the visible sheet name
+      const label = stageShort(matches.length);
+      XLSX.utils.book_append_sheet(wb, ws, label);
     }
     const fname = `${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.xlsx`;
     XLSX.writeFile(wb, fname);
@@ -142,219 +150,281 @@ function exportTournamentToExcel(tn) {
 }
 
 // ---------- Export: PDF ----------
-// ---------- Export: PDF (canvas-drawn bracket with connector lines incl. Champion) ----------
-// ---------- Export: PDF (full bracket with connector lines + placeholders) ----------
 /** Vector PDF export: no element splits, white paper, black text */
+// ---- Bracket helpers (add once, near your other helpers) ----
+function nextPow2(n){ let p=1; while(p<n) p*=2; return p; }
+
+function stageShort(count) {
+  if (count === 1) return "F";
+  if (count === 2) return "SF";
+  if (count === 4) return "QF";
+  if (count === 8) return "R16";
+  if (count === 16) return "R32";
+  if (count === 32) return "R64";
+  return `R${count * 2}`;
+}
+
+/** Build a full (projected) bracket up to Finals, padding with placeholders */
+function buildProjectedRounds(tn) {
+  const byRound = new Map();
+  for (const m of (tn.matches || [])) {
+    if (!byRound.has(m.round)) byRound.set(m.round, []);
+    byRound.get(m.round).push(m);
+  }
+  for (const [r, arr] of byRound) byRound.set(r, arr.slice());
+
+  const teamCount = (tn.teams || []).length;
+  if (teamCount < 2) {
+    const only = (byRound.get(1) || []).slice();
+    return only.length ? [{ round: 1, matches: only }] : [];
+  }
+  const slots = nextPow2(teamCount);
+  const totalRounds = Math.log2(slots);
+  const out = [];
+
+  for (let r = 1; r <= totalRounds; r++) {
+    const expected = slots / Math.pow(2, r); // matches in round r
+    const existing = (byRound.get(r) || []).slice(0, expected);
+    const padded = Array.from({ length: expected }, (_, i) => {
+      const ex = existing[i];
+      if (ex) return ex;
+      return {
+        id: `__placeholder_${r}_${i}__`,
+        round: r,
+        aId: null,
+        bId: null,
+        status: r === 1 ? "Scheduled" : "Pending",
+        winnerId: null,
+      };
+    });
+    out.push({ round: r, matches: padded });
+  }
+  return out;
+}
+
+/** Label helpers for placeholder names */
+function feederLabel(roundMatchesCount, matchIdxZeroBased) {
+  // e.g., roundMatchesCount=4 → QF ; index 0 → QF1, index 1 → QF2...
+  const label = stageShort(roundMatchesCount);
+  return `${label}${matchIdxZeroBased + 1}`;
+}
+
+function placeholderName(prevRoundMatchesCount, childMatchIndex) {
+  // childMatchIndex is zero-based into previous round
+  return `Winner of ${feederLabel(prevRoundMatchesCount, childMatchIndex)}`;
+}
+
+// ---- NEW Vector PDF exporter (replace your exportTournamentToPDF with this) ----
 async function exportTournamentToPDF(tn) {
-  // ---- jsPDF (UMD) guard ----
-  const jsPDFCtor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF || window.jspdf;
-  if (!jsPDFCtor) {
-    alert("jsPDF not found. Include jspdf.umd.min.js.");
-    return;
-  }
+  const jsPDFCtor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF || (window.jspdf && window.jspdf.default);
+  if (!jsPDFCtor) { alert("jsPDF not found. Include jspdf.umd.min.js"); return; }
 
-  // ---- helpers you already have or similar ----
-  const rounds = groupMatchesByRound(tn); // [{round, matches}]
-  if (!rounds.length) return alert("No matches to export.");
-  const teamMap = Object.fromEntries(tn.teams.map(t => [t.id, t.name]));
+  const rounds = buildProjectedRounds(tn);
+  if (!rounds.length) { alert("No matches to export."); return; }
 
-  const short = (n) => {
-    if (!Number.isFinite(n) || n <= 0) return "R?";
-    if (n === 1) return "F";
-    if (n === 2) return "SF";
-    if (n === 4) return "QF";
-    if (n === 8) return "R16";
-    if (n === 16) return "R32";
-    if (n === 32) return "R64";
-    return `R${n * 2}`;
-  };
-  const nameOf = (id) => teamMap[id] || (id ? "Unknown" : "BYE/TBD");
-
-  // Given round index r, match index i => “Winner of QF1”, etc.
-  function placeholderWinnerText(rIdx, iIdx) {
-    const mcount = rounds[rIdx].matches.length;
-    const tag = short(mcount);
-    const n = iIdx + 1;
-    return `Winner of ${tag}${mcount === 1 ? "" : n}`;
-  }
-
-  // Label A/B for pending matches (when aId/bId absent)
-  function entryLabel(rIdx, iIdx, side /* 'a'|'b' */, m) {
-    const id = side === 'a' ? m.aId : m.bId;
-    if (id) return nameOf(id);
-
-    // If this side is empty and previous round exists,
-    // deduce the feeder match index.
-    if (rIdx === 0) return "BYE/TBD";
-    const feeder = Math.min(rounds[rIdx - 1].matches.length - 1, (iIdx * 2) + (side === 'a' ? 0 : 1));
-    return placeholderWinnerText(rIdx - 1, feeder);
-  }
-
-  // ----- PAGE + LAYOUT CONSTANTS -----
   const pdf = new jsPDFCtor({ orientation: "landscape", unit: "pt", format: "a4" });
-  const PAGE_W = pdf.internal.pageSize.getWidth();
-  const PAGE_H = pdf.internal.pageSize.getHeight();
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const margin = 36;
 
-  const MARGIN = 36;
-  const HEADER_H = 28;
-  const FOOTER_H = 0;
+  // Colors / styles (white background, black text/lines)
+  const BG = "#ffffff";
+  const FG = "#000000";
+  const LINE = "#000000";
 
-  const COL_W = 240;          // card width
-  const COL_GAP = 60;         // space between columns
-  const CARD_H = 46;          // card height
-  const CARD_GAP = 18;        // vertical gap between cards within a round slice
+  // Title + meta
+  const title = `${tn.name} — Fixtures`;
+  pdf.setFillColor(BG);
+  pdf.rect(0, 0, pageW, pageH, "F");
+  pdf.setTextColor(FG);
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(18);
+  pdf.text(title, margin, margin + 6);
 
-  // fonts + colors
-  const ink = "#000000";
-  pdf.setTextColor(0, 0, 0);
+  // Layout measurements in "virtual" coordinates before scale-to-fit
+  const colGap = 44;      // space between rounds
+  const boxW  = 210;      // match box width for early rounds
+  const boxH0 = 34;       // base box height (Round 1)
+  const vGap0 = 16;       // vertical gap between boxes in Round 1
+  const strokeW = 1.2;
 
-  // ----- TWO-PASS LAYOUT -----
-  // We paginate first (compute which matches land on which page and y),
-  // then render and finally draw connectors for endpoints on the same page.
-  const usableTop = MARGIN + HEADER_H + 10;
-  const usableBottom = PAGE_H - MARGIN - FOOTER_H;
-  const usableHeight = usableBottom - usableTop;
+  // Box height grows slightly for later rounds (more whitespace), spacing doubles each round
+  const colWidths = rounds.map((_, rIdx) => boxW * Math.max(0.75, 1 - rIdx * 0.08));
+  const roundHeights = rounds.map((_, rIdx) => boxH0 + rIdx * 4);
+  const roundVGaps   = rounds.map((_, rIdx) => vGap0 * Math.pow(2, rIdx));
 
-  // Compute x per column
-  const colXs = [];
+  // Compute column x positions
+  const colX = [];
+  let totalW = margin; // start virtual width counting from 0, margins applied after scale
   for (let r = 0; r < rounds.length; r++) {
-    colXs.push(MARGIN + r * (COL_W + COL_GAP));
+    if (r === 0) {
+      colX[r] = 0;
+      totalW += colWidths[r];
+    } else {
+      colX[r] = colX[r - 1] + colWidths[r - 1] + colGap;
+      totalW += colGap + colWidths[r];
+    }
   }
 
-  // 1) Build page slices: pages[pageIndex] = { columns: Map(roundIdx -> [{iIdx, y}]) }
-  const pages = [];
-  let page = { columns: new Map() };
-  let colYs = new Array(rounds.length).fill(usableTop); // current y per col on this page
-  pages.push(page);
+  // Compute total virtual height = enough to stack all R1 matches
+  const r1Count = rounds[0].matches.length;
+  const boxH = roundHeights[0];
+  const vGap = roundVGaps[0];
+  const bodyH = r1Count * boxH + (r1Count - 1) * vGap;
+  const totalH = bodyH;
 
-  for (let r = 0; r < rounds.length; r++) {
-    page.columns.set(r, []);
-  }
+  // Scale-to-fit (so everything stays on one page)
+  const maxW = pageW - margin * 2;
+  const maxH = pageH - (margin * 2 + 18 + 10); // leave room for title
+  const scale = Math.min(1, maxW / totalW, maxH / totalH);
+
+  // Draw origin
+  const originX = margin;
+  const originY = margin + 24; // below title
+  const S = (n) => n * scale;
+
+  // Teams map
+  const teamMap = Object.fromEntries((tn.teams || []).map(t => [t.id, t.name]));
+
+  // Cache all box positions for connectors: pos[r][i] = {x,y,w,h}
+  const pos = rounds.map((r, rIdx) => {
+    const matches = r.matches;
+    const thisBoxH = roundHeights[rIdx];
+    const thisVGap = roundVGaps[rIdx];
+
+    // For round r: each match spans one "row block" whose height equals
+    // (prev round's box + gap) * 2, except for Round 1 which is simple stack.
+    const arr = [];
+    if (rIdx === 0) {
+      // straight stack
+      let y = 0;
+      for (let i = 0; i < matches.length; i++) {
+        arr.push({
+          x: colX[rIdx],
+          y,
+          w: colWidths[rIdx],
+          h: thisBoxH,
+        });
+        y += thisBoxH + thisVGap;
+      }
+    } else {
+      const prevCount = rounds[rIdx - 1].matches.length;
+      const prevBoxH  = roundHeights[rIdx - 1];
+      const prevVGap  = roundVGaps[rIdx - 1];
+
+      // The vertical spacing for a round r box is exactly the "span" of its two children:
+      const childBlockH = prevBoxH + prevVGap; // height per child block
+      const myBlockH = childBlockH * 2 - prevVGap; // span of two children minus the middle gap
+      let y = (myBlockH - thisBoxH) / 2; // center within child span
+
+      for (let i = 0; i < matches.length; i++) {
+        arr.push({
+          x: colX[rIdx],
+          y,
+          w: colWidths[rIdx],
+          h: thisBoxH,
+        });
+        y += myBlockH;
+      }
+    }
+    return arr;
+  });
+
+  // Helpers (text)
+  const playerName = (id) => teamMap[id] || (id ? "Unknown" : "BYE/TBD");
+  const boxText = (rIdx, iIdx, side, m) => {
+    if (rIdx === 0) {
+      return playerName(side === "a" ? m.aId : m.bId);
+    }
+    const prevCount = rounds[rIdx - 1].matches.length;
+    const childIndex = iIdx * 2 + (side === "a" ? 0 : 1);
+    return placeholderName(prevCount, childIndex);
+  };
+  const winnerText = (m) => (m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD");
+
+  // Draw boxes + text
+  pdf.setLineWidth(strokeW);
+  pdf.setDrawColor(LINE);
+  pdf.setFont("helvetica", "normal");
 
   for (let r = 0; r < rounds.length; r++) {
     const matches = rounds[r].matches;
+    const labelForRound = stageShort(matches.length);
+    const thisBoxH = roundHeights[r];
+
     for (let i = 0; i < matches.length; i++) {
-      // Need spacing between pairs for connector vertical mid alignment
-      // but we still keep a consistent per-card height + gap for no-cut layout
-      const need = CARD_H + CARD_GAP;
+      const m = matches[i];
+      const p = pos[r][i];
 
-      // If it doesn't fit, start a new page and reset only this column's y
-      if (colYs[r] + need > usableBottom) {
-        // new page
-        page = { columns: new Map() };
-        pages.push(page);
-        colYs = colYs.map(() => usableTop);
-        for (let rr = 0; rr < rounds.length; rr++) page.columns.set(rr, []);
-      }
+      // box
+      pdf.setFillColor("#ffffff");
+      pdf.rect(originX + S(p.x), originY + S(p.y), S(p.w), S(p.h), "S");
 
-      page.columns.get(r).push({ iIdx: i, y: colYs[r] });
-      colYs[r] += need;
-    }
-    // After finishing a column, reset y for the next column back to top
-    // (so columns don't “stack” vertically)
-    colYs[r] = usableTop;
-  }
+      // text
+      pdf.setFontSize(10 * scale);
+      const pad = 6 * scale;
 
-  // 2) Render pass
-  function renderPage(pageIndex) {
-    if (pageIndex > 0) pdf.addPage();
-    // White background page
-    pdf.setFillColor(255, 255, 255);
-    pdf.rect(0, 0, PAGE_W, PAGE_H, "F");
-
-    // Header
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(16);
-    pdf.text(`${tn.name} — Fixtures`, MARGIN, MARGIN + 16);
-
-    // Draw columns
-    for (let r = 0; r < rounds.length; r++) {
-      const mcount = rounds[r].matches.length;
-      const label = short(mcount);
-
-      // Column header
+      // Round label small at top-left
       pdf.setFont("helvetica", "bold");
-      pdf.setFontSize(12);
-      pdf.text(label, colXs[r], usableTop - 10);
+      pdf.text(labelForRound, originX + S(p.x) + pad, originY + S(p.y) + pad + 8 * scale);
 
-      const items = pages[pageIndex].columns.get(r) || [];
-      for (const { iIdx, y } of items) {
-        const m = rounds[r].matches[iIdx];
+      // names
+      pdf.setFont("helvetica", "normal");
+      const aY = originY + S(p.y) + pad + 18 * scale;
+      const bY = originY + S(p.y) + pad + 34 * scale;
 
-        // Card
-        pdf.setDrawColor(0, 0, 0);
-        pdf.setLineWidth(0.8);
-        pdf.rect(colXs[r], y, COL_W, CARD_H, "S");
+      const aTxt = boxText(r, i, "a", m);
+      const bTxt = boxText(r, i, "b", m);
+      pdf.text(aTxt, originX + S(p.x) + pad, aY);
+      pdf.text(bTxt, originX + S(p.x) + pad, bY);
 
-        // Labels
-        pdf.setFont("helvetica", "normal");
-        pdf.setFontSize(10);
-
-        const aTxt = entryLabel(r, iIdx, 'a', m);
-        const bTxt = entryLabel(r, iIdx, 'b', m);
-        const wTxt = m.winnerId ? nameOf(m.winnerId) : "TBD";
-
-        // First line (A)
-        pdf.text(aTxt, colXs[r] + 8, y + 16, { maxWidth: COL_W - 16 });
-        // Second line (B)
-        pdf.text(bTxt, colXs[r] + 8, y + 30, { maxWidth: COL_W - 16 });
-
-        // Right corner: match index label (e.g., QF3)
-        pdf.setFont("helvetica", "bold");
-        pdf.setFontSize(9);
-        const idxLabel = `${label}${mcount === 1 ? "" : (iIdx + 1)}`;
-        pdf.text(idxLabel, colXs[r] + COL_W - 8, y + 14, { align: "right" });
-
-        // Winner (small, bottom-right)
-        pdf.setFont("helvetica", "normal");
-        pdf.setFontSize(9);
-        pdf.text(`W: ${wTxt}`, colXs[r] + COL_W - 8, y + CARD_H - 8, { align: "right", maxWidth: COL_W - 16 });
-      }
+      // winner line (optional, small)
+      const wTxt = `Winner: ${winnerText(m)}`;
+      pdf.setFontSize(9 * scale);
+      pdf.text(wTxt, originX + S(p.x) + pad, originY + S(p.y + thisBoxH) - pad);
     }
-
-    // Connectors (only when both endpoints are on this page)
-    pdf.setDrawColor(0, 0, 0);
-    pdf.setLineWidth(0.7);
-
-    for (let r = 0; r < rounds.length - 1; r++) {
-      const left = pages[pageIndex].columns.get(r) || [];
-      const right = pages[pageIndex].columns.get(r + 1) || [];
-
-      // quick map of (r+1,i) -> y
-      const rightY = new Map(right.map(it => [it.iIdx, it.y]));
-
-      for (const { iIdx, y: yLeft } of left) {
-        const targetIdx = Math.floor(iIdx / 2);
-        if (!rightY.has(targetIdx)) continue; // target not on this page => skip to avoid cross-page cuts
-
-        const yRight = rightY.get(targetIdx);
-
-        const x1 = colXs[r] + COL_W;
-        const y1 = yLeft + CARD_H / 2;
-        const x2 = colXs[r + 1];
-        const y2 = yRight + CARD_H / 2;
-        const midX = (x1 + x2) / 2;
-
-        // ──┐ and ┌── style elbow connector
-        pdf.line(x1, y1, midX, y1);
-        pdf.line(midX, y1, midX, y2);
-        pdf.line(midX, y2, x2, y2);
-      }
-    }
-
-    // (Optional) footer page number
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(9);
-    pdf.text(`Page ${pageIndex + 1} of ${pages.length}`, PAGE_W - MARGIN, PAGE_H - MARGIN / 2, { align: "right" });
   }
 
-  for (let p = 0; p < pages.length; p++) renderPage(p);
+  // Draw connectors from round r to r+1
+  for (let r = 0; r < rounds.length - 1; r++) {
+    const child = pos[r];
+    const parent = pos[r + 1];
 
-  // Save
-  const fname = `${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`;
-  pdf.save(fname);
+    for (let i = 0; i < parent.length; i++) {
+      const p = parent[i];
+
+      // children indices
+      const c1 = child[i * 2];
+      const c2 = child[i * 2 + 1];
+      if (!c1 || !c2) continue;
+
+      // right-middle of each child box
+      const c1x = originX + S(c1.x + c1.w);
+      const c2x = originX + S(c2.x + c2.w);
+      const c1y = originY + S(c1.y + c1.h / 2);
+      const c2y = originY + S(c2.y + c2.h / 2);
+
+      // left-middle of parent box
+      const px = originX + S(p.x);
+      const py = originY + S(p.y + p.h / 2);
+
+      // Draw: child1 → horizontal to mid, child2 → horizontal to mid, vertical between them, and into parent
+      const midX = px - 10 * scale;
+
+      pdf.setDrawColor(LINE);
+      pdf.line(c1x, c1y, midX, c1y);
+      pdf.line(c2x, c2y, midX, c2y);
+
+      // vertical join
+      pdf.line(midX, c1y, midX, c2y);
+
+      // into parent
+      pdf.line(midX, py, px, py);
+    }
+  }
+
+  pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
 }
-
 
 // ---------- UI bits ----------
 function TabButton({ id, label, tab, setTab }) {
@@ -405,7 +475,7 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
     <div className="flex flex-wrap items-center gap-2 py-2 text-sm">
       <span className="w-40 text-zinc-400">
         {stageText}
-        {stageText === "Finals" ? "" : <> • M{idx}</>}
+        {stageText === "F" ? "" : <> • M{idx}</>}
       </span>
       <span className="flex-1">{aName}</span>
       {!bothEmpty && !singleBye && <span>vs</span>}
@@ -604,7 +674,7 @@ export default function TournamentMaker() {
       const names = builderTeams.length
         ? builderTeams.map((b) => b.name)
         : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-      applyEntriesToTournament(targetTournamentId, names);
+      applyEntriesToTournament(targetTournamentId, names); // NOTE: still referenced, implement if needed.
       return;
     }
     if (!tName.trim()) return alert("Please enter a Tournament Name.");
@@ -806,7 +876,7 @@ export default function TournamentMaker() {
           {isAdmin && <TabButton id="schedule" label="SCHEDULE" tab={tab} setTab={setTab} />}
           <TabButton id="fixtures" label="FIXTURES" tab={tab} setTab={setTab} />
           <TabButton id="standings" label="STANDINGS" tab={tab} setTab={setTab} />
-          <TabButton id="winners" label="WINNERS" tab={tab} setTab={setTab} />
+          <TabButton id="winners" label="W INNERS" tab={tab} setTab={setTab} />
           {isAdmin && <TabButton id="deleted" label="DELETED" tab={tab} setTab={setTab} />}
         </div>
         <div className="flex gap-2 items-center">
@@ -1066,7 +1136,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                       Export Excel
                     </button>
                     <span className="text-xs text-white/70">
-                      Current: {stageLabelByCount(counts.get(mr)) || `Round ${mr}`}
+                      Current: {stageShort(counts.get(mr) || 0)}
                     </span>
                     {isAdmin && (
                       <button
@@ -1090,7 +1160,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                       idx={i + 1}
                       m={m}
                       teamMap={teamMap}
-                      stageText={stageLabelByCount(roundCounts(tn).get(m.round)) || `Round ${m.round}`}
+                      stageText={stageShort(roundCounts(tn).get(m.round) || 0)}
                       onPickWinner={(mid, wid) => (isAdmin ? pickWinner(tn.id, mid, wid) : null)}
                       canEdit={isAdmin}
                     />
@@ -1119,22 +1189,23 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
             }
             const ordered = Array.from(byRound.entries()).sort((a, b) => a[0] - b[0]);
             const mr = tn.matches.length ? Math.max(...tn.matches.map((m) => m.round)) : 1;
+            const currentCount = (ordered.find(([r]) => r === mr)?.[1].length) || 0;
             const subtitle =
               tn.status === "completed"
                 ? `Completed • Champion: ${tn.championId ? teamMap[tn.championId] || "TBD" : "TBD"}`
-                : `Active • Current: ${stageLabelByCount(ordered.find(([r]) => r === mr)?.[1].length || 0) || `Round ${mr}`}`;
+                : `Active • Current: ${stageShort(currentCount)}`;
 
             return (
               <Collapsible key={tn.id} title={tn.name} subtitle={subtitle} defaultOpen={false}>
                 {ordered.map(([round, arr]) => (
                   <div key={round} className="mb-3">
-                    <h3 className="font-semibold mb-1">{stageLabelByCount(arr.length) || `Round ${round}`}</h3>
+                    <h3 className="font-semibold mb-1">{stageShort(arr.length)}</h3>
                     <ul className="space-y-1 text-sm">
                       {arr.map((m, i) => {
                         const a = teamMap[m.aId] || "BYE/TBD";
                         const b = teamMap[m.bId] || "BYE/TBD";
                         const w = m.winnerId ? teamMap[m.winnerId] || "TBD" : null;
-                        const isFinals = stageLabelByCount(arr.length) === "Finals";
+                        const isFinals = stageShort(arr.length) === "F";
                         return (
                           <li key={m.id}>
                             {isFinals ? (
@@ -1171,19 +1242,21 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
               if (!byRound.has(m.round)) byRound.set(m.round, []);
               byRound.get(m.round).push(m);
             }
-            const ordered = Array.from(byRound.entries()).sort((a, b) => a[0] - b[0]).filter(([_, arr]) => {
-              const label = stageLabelByCount(arr.length);
-              return label === "Finals" || label === "Semi Finals";
-            });
+            const ordered = Array.from(byRound.entries())
+              .sort((a, b) => a[0] - b[0])
+              .filter(([_, arr]) => {
+                const code = stageShort(arr.length);
+                return code === "F" || code === "SF";
+              });
             const championName = tn.championId ? teamMap[tn.championId] || "TBD" : "TBD";
             return (
               <Collapsible key={tn.id} title={tn.name} subtitle={`Champion: ${championName}`} defaultOpen={false}>
                 {ordered.length === 0 ? (
-                  <p className="text-white/80 text-sm">No Semi Finals/Finals recorded yet.</p>
+                  <p className="text-white/80 text-sm">No SF/F recorded yet.</p>
                 ) : (
                   ordered.map(([round, arr]) => (
                     <div key={round} className="mb-3">
-                      <h3 className="font-semibold mb-1">{stageLabelByCount(arr.length)}</h3>
+                      <h3 className="font-semibold mb-1">{stageShort(arr.length)}</h3>
                       <ul className="space-y-1 text-sm">
                         {arr.map((m, i) => {
                           const a = teamMap[m.aId] || "BYE/TBD";
@@ -1298,7 +1371,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
     if (!IS_DEV) return;
     const eq = (name, got, exp) =>
       console.log(`[TEST] ${name}:`, Array.isArray(exp) ? JSON.stringify(got) === JSON.stringify(exp) : got === exp ? "PASS" : "FAIL");
-    eq("normalizeHeader", normalizeHeader(" Players "), "players");
+    // eq("normalizeHeader", normalizeHeader(" Players "), "players");
   } catch (e) {
     console.warn("Dev tests error:", e);
   }

@@ -142,6 +142,7 @@ function exportTournamentToExcel(tn) {
 }
 
 // ---------- Export: PDF ----------
+// ---------- Export: PDF (canvas-drawn bracket with connector lines incl. Champion) ----------
 async function exportTournamentToPDF(tn) {
   const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
   const grouped = groupMatchesByRound(tn);
@@ -150,135 +151,208 @@ async function exportTournamentToPDF(tn) {
     return;
   }
 
-  // Build off-screen printable layout
-  const wrap = document.createElement("div");
-  wrap.style.position = "fixed";
-  wrap.style.left = "-99999px";
-  wrap.style.top = "0";
-  wrap.style.width = "2000px";
-  wrap.style.padding = "24px";
-  wrap.style.background = "#0b1120";
-  wrap.style.color = "#fff";
-  wrap.style.fontFamily = "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+  // Layout constants
+  const margin = 32;
+  const headerH = 56;
+  const colWidth = 260;         // width per round
+  const boxW = 220;             // match card width
+  const boxH = 64;              // match card height
+  const slotH = 120;            // vertical step per match in a round
+  const gapX = 24;              // horizontal gap to connector
+  const r = 10;                 // card radius
 
-  const h = document.createElement("div");
-  h.textContent = `${tn.name} — Fixtures`;
-  h.style.fontSize = "28px";
-  h.style.fontWeight = "800";
-  h.style.marginBottom = "18px";
-  wrap.appendChild(h);
+  const rounds = grouped.length;
+  const maxMatches = Math.max(...grouped.map(g => g.matches.length));
 
-  const cols = document.createElement("div");
-  cols.style.display = "flex";
-  cols.style.gap = "18px";
-  cols.style.alignItems = "flex-start";
-  wrap.appendChild(cols);
+  // Extra space to the right for the Champion box
+  const championColExtra = 180;
 
-  const cardStyle = `
-    border:1px solid rgba(255,255,255,.15);
-    border-radius:12px;
-    padding:10px 12px;
-    background: rgba(255,255,255,0.04);
-    min-width: 260px;
-    margin-bottom: 12px;
-  `;
+  const canvasW = margin * 2 + rounds * colWidth + championColExtra;
+  const canvasH = margin * 2 + headerH + Math.max(boxH, maxMatches * slotH);
 
-  grouped.forEach(({ round, matches }) => {
-    const col = document.createElement("div");
-    col.style.minWidth = "280px";
-    col.style.maxWidth = "320px";
+  // Offscreen canvas
+  const canvas = document.createElement("canvas");
+  canvas.width = canvasW;
+  canvas.height = canvasH;
+  const ctx = canvas.getContext("2d");
 
-    const label = document.createElement("div");
-    label.textContent = stageLabelByCount(matches.length) || `Round ${round}`;
-    label.style.fontWeight = "700";
-    label.style.marginBottom = "8px";
-    col.appendChild(label);
+  // Background
+  ctx.fillStyle = "#0b1120";
+  ctx.fillRect(0, 0, canvasW, canvasH);
 
-    matches.forEach((m, i) => {
-      const a = playerName(teamMap, m.aId);
-      const b = playerName(teamMap, m.bId);
-      const w = winnerText(teamMap, m);
-      const s = statusText(m);
+  // Header
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 24px Inter, system-ui, sans-serif";
+  ctx.textBaseline = "top";
+  ctx.fillText(`${tn.name} — Fixtures`, margin, margin);
 
-      const card = document.createElement("div");
-      card.setAttribute("style", cardStyle);
+  // Subtle grid lines
+  ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  ctx.lineWidth = 1;
+  for (let y = margin + headerH; y < canvasH - margin; y += 40) {
+    ctx.beginPath();
+    ctx.moveTo(margin, y);
+    ctx.lineTo(canvasW - margin, y);
+    ctx.stroke();
+  }
 
-      const head = document.createElement("div");
-      head.style.display = "flex";
-      head.style.justifyContent = "space-between";
-      head.style.fontSize = "12px";
-      head.style.opacity = ".85";
-      head.innerHTML = `<span>Match ${i + 1}</span><span>Status: ${s}</span>`;
-      card.appendChild(head);
+  // Helpers
+  const stageLabel = (count) => stageLabelByCount(count) || "";
+  const text = (m) => {
+    const a = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
+    const b = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
+    const w = m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD";
+    const s = (m.status && String(m.status).trim())
+      ? m.status
+      : (!m.aId && !m.bId) ? "Empty"
+      : (!m.aId || !m.bId) ? "BYE"
+      : "TBD";
+    return { a, b, w, s };
+  };
+  const roundX = (ri) => margin + ri * colWidth;
+  const matchY = (mi) => margin + headerH + mi * slotH;
 
-      const aDiv = document.createElement("div");
-      aDiv.style.marginTop = "6px";
-      aDiv.textContent = a;
+  // Rounded rect
+  function roundRect(x, y, w, h, rad) {
+    ctx.beginPath();
+    ctx.moveTo(x + rad, y);
+    ctx.lineTo(x + w - rad, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rad);
+    ctx.lineTo(x + w, y + h - rad);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - rad, y + h);
+    ctx.lineTo(x + rad, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - rad);
+    ctx.lineTo(x, y + rad);
+    ctx.quadraticCurveTo(x, y, x + rad, y);
+    ctx.closePath();
+  }
 
-      const vs = document.createElement("div");
-      vs.textContent = a !== "BYE/TBD" && b !== "BYE/TBD" ? "vs" : "";
-      vs.style.opacity = ".7";
-      vs.style.fontSize = "12px";
-      vs.style.margin = "2px 0";
+  // Draw rounds & match cards
+  ctx.font = "bold 14px Inter, system-ui, sans-serif";
+  ctx.fillStyle = "#ffffff";
+  grouped.forEach(({ round, matches }, ri) => {
+    const x = roundX(ri);
+    const label = stageLabel(matches.length) || `Round ${round}`;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(label, x, margin + headerH - 26);
 
-      const bDiv = document.createElement("div");
-      bDiv.textContent = b;
+    matches.forEach((m, mi) => {
+      const y = matchY(mi) + (slotH - boxH) / 2;
 
-      const win = document.createElement("div");
-      win.style.marginTop = "6px";
-      win.innerHTML = `Winner: <b>${w}</b>`;
+      // Card background
+      roundRect(x, y, boxW, boxH, r);
+      ctx.fillStyle = "rgba(255,255,255,0.06)";
+      ctx.fill();
 
-      card.appendChild(aDiv);
-      if (vs.textContent) card.appendChild(vs);
-      card.appendChild(bDiv);
-      card.appendChild(win);
+      // Border
+      ctx.strokeStyle = "rgba(255,255,255,0.18)";
+      ctx.lineWidth = 1;
+      roundRect(x, y, boxW, boxH, r);
+      ctx.stroke();
 
-      col.appendChild(card);
+      // Content
+      const { a, b, w, s } = text(m);
+      ctx.fillStyle = "rgba(255,255,255,0.8)";
+      ctx.font = "600 12px Inter, system-ui, sans-serif";
+      ctx.fillText(`Match ${mi + 1} • ${s}`, x + 12, y + 10);
+
+      ctx.font = "14px Inter, system-ui, sans-serif";
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(a, x + 12, y + 30);
+
+      ctx.fillStyle = "rgba(255,255,255,0.8)";
+      if (a !== "BYE/TBD" && b !== "BYE/TBD") ctx.fillText("vs", x + 12, y + 46);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(b, x + 48, y + 46);
+
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.font = "600 12px Inter, system-ui, sans-serif";
+      ctx.fillText(`Winner: ${w}`, x + 12, y + boxH - 14);
     });
-
-    cols.appendChild(col);
   });
 
-  document.body.appendChild(wrap);
+  // Connectors between rounds (match i -> floor(i/2) in next round)
+  ctx.strokeStyle = "rgba(255,255,255,0.35)";
+  ctx.lineWidth = 2;
+  for (let ri = 0; ri < grouped.length - 1; ri++) {
+    for (let mi = 0; mi < grouped[ri].matches.length; mi++) {
+      const srcX = roundX(ri) + boxW;
+      const srcY = matchY(mi) + (slotH - boxH) / 2 + boxH / 2;
 
-  try {
-    const canvas = await window.html2canvas(wrap, {
-      backgroundColor: "#0b1120",
-      scale: 2,
-      useCORS: true,
-    });
+      const targetIdx = Math.floor(mi / 2);
+      const dstX = roundX(ri + 1);
+      const dstY = matchY(targetIdx) + (slotH - boxH) / 2 + boxH / 2;
 
-    const imgData = canvas.toDataURL("image/png");
-    const pdf = new window.jspdf.jsPDF({
-      orientation: "landscape",
-      unit: "pt",
-      format: "a4",
-    });
-
-    const pageW = pdf.internal.pageSize.getWidth();
-    const pageH = pdf.internal.pageSize.getHeight();
-    const margin = 24;
-    const maxW = pageW - margin * 2;
-    const maxH = pageH - margin * 2;
-
-    const imgW = canvas.width;
-    const imgH = canvas.height;
-    let renderW = maxW;
-    let renderH = (imgH / imgW) * renderW;
-    if (renderH > maxH) {
-      renderH = maxH;
-      renderW = (imgW / imgH) * renderH;
+      const midX = srcX + gapX;
+      ctx.beginPath();
+      ctx.moveTo(srcX, srcY);
+      ctx.lineTo(midX, srcY);
+      ctx.lineTo(midX, dstY);
+      ctx.lineTo(dstX, dstY);
+      ctx.stroke();
     }
-
-    pdf.addImage(imgData, "PNG", (pageW - renderW) / 2, (pageH - renderH) / 2, renderW, renderH);
-    pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
-  } catch (e) {
-    console.error("PDF export failed:", e);
-    alert("PDF export failed. Check console.");
-  } finally {
-    document.body.removeChild(wrap);
   }
+
+  // ---- Champion box (connect finals → champion) ----
+  const lastRi = grouped.length - 1;
+  const finals = grouped[lastRi].matches;
+  // If there's a single final match, connect it to a Champion box at the far right
+  if (finals.length >= 1) {
+    const finIdx = 0; // show the first final; if there are multiple, first is typical bracket final
+    const fX = roundX(lastRi);
+    const fY = matchY(finIdx) + (slotH - boxH) / 2 + boxH / 2;
+
+    // Champion card position
+    const champW = 180;
+    const champH = 64;
+    const champX = fX + boxW + gapX + 40; // a bit right of final connector
+    const champY = fY - champH / 2;
+
+    // Connector from final to champion
+    ctx.beginPath();
+    ctx.moveTo(fX + boxW, fY);
+    ctx.lineTo(champX - 20, fY);
+    ctx.stroke();
+
+    // Champion card
+    roundRect(champX, champY, champW, champH, r);
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 2;
+    roundRect(champX, champY, champW, champH, r);
+    ctx.stroke();
+
+    // Champion text
+    const championName = tn.championId ? (teamMap[tn.championId] || "TBD") : "TBD";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 14px Inter, system-ui, sans-serif";
+    ctx.fillText("Champion", champX + 12, champY + 14);
+    ctx.font = "600 16px Inter, system-ui, sans-serif";
+    ctx.fillText(championName, champX + 12, champY + 38);
+  }
+
+  // Render to PDF
+  const img = canvas.toDataURL("image/png");
+  const pdf = new window.jspdf.jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const pad = 24;
+  const maxW = pageW - pad * 2;
+  const maxH = pageH - pad * 2;
+
+  let w = maxW;
+  let h = (canvasH / canvasW) * w;
+  if (h > maxH) {
+    h = maxH;
+    w = (canvasW / canvasH) * h;
+  }
+  pdf.addImage(img, "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
+  pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
 }
+
 
 // ---------- UI bits ----------
 function TabButton({ id, label, tab, setTab }) {

@@ -1188,7 +1188,24 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 : `Active • Current: ${stageShort(currentCount)}`;
 
             return (
-              <Collapsible key={tn.id} title={tn.name} subtitle={subtitle} defaultOpen={false}>
+              <Collapsible
+  key={tn.id}
+  title={tn.name}
+  subtitle={subtitle}
+  right={
+    isAdmin ? (
+      <button
+        className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
+        onClick={() => openDeleteModal(tn.id)}
+        title="Delete tournament"
+      >
+        Delete
+      </button>
+    ) : null
+  }
+  defaultOpen={false}
+>
+
                 {ordered.map(([round, arr]) => (
                   <div key={round} className="mb-3">
                     <h3 className="font-semibold mb-1">{stageShort(arr.length)}</h3>
@@ -1242,7 +1259,24 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
               });
             const championName = tn.championId ? teamMap[tn.championId] || "TBD" : "TBD";
             return (
-              <Collapsible key={tn.id} title={tn.name} subtitle={`Champion: ${championName}`} defaultOpen={false}>
+              <Collapsible
+  key={tn.id}
+  title={tn.name}
+  subtitle={`Champion: ${championName}`}
+  right={
+    isAdmin ? (
+      <button
+        className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
+        onClick={() => openDeleteModal(tn.id)}
+        title="Delete tournament"
+      >
+        Delete
+      </button>
+    ) : null
+  }
+  defaultOpen={false}
+>
+
                 {ordered.length === 0 ? (
                   <p className="text-white/80 text-sm">No SF/F recorded yet.</p>
                 ) : (

@@ -144,382 +144,216 @@ function exportTournamentToExcel(tn) {
 // ---------- Export: PDF ----------
 // ---------- Export: PDF (canvas-drawn bracket with connector lines incl. Champion) ----------
 // ---------- Export: PDF (full bracket with connector lines + placeholders) ----------
-// ---------- Export: PDF (white theme, multi-page, NO card splitting) ----------
+/** Vector PDF export: no element splits, white paper, black text */
 async function exportTournamentToPDF(tn) {
-  const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
-  const groupedReal = groupMatchesByRound(tn);
-  if (!groupedReal.length) return alert("No matches to export.");
-
-  // Build full bracket shape (fill missing rounds with virtual TBD matches)
-  const round1Count = Math.max(1, groupedReal[0].matches.length);
-  const slots = Math.max(2, round1Count * 2);
-  const totalRounds = Math.max(1, Math.round(Math.log2(slots)));
-  const realByNum = new Map(groupedReal.map(({ round, matches }) => [round, matches]));
-  const allRounds = [];
-  for (let ri = 0; ri < totalRounds; ri++) {
-    const roundNum = ri + 1;
-    const count = Math.max(1, round1Count >> ri);
-    const real = realByNum.get(roundNum);
-    allRounds.push(
-      real
-        ? { round: roundNum, matches: real }
-        : {
-            round: roundNum,
-            matches: Array.from({ length: count }, (_, i) => ({
-              id: `virtual-${roundNum}-${i}`,
-              round: roundNum,
-              aId: null,
-              bId: null,
-              status: "TBD",
-              winnerId: null,
-              __virtual: true,
-            })),
-          }
-    );
+  // ---- jsPDF (UMD) guard ----
+  const jsPDFCtor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF || window.jspdf;
+  if (!jsPDFCtor) {
+    alert("jsPDF not found. Include jspdf.umd.min.js.");
+    return;
   }
 
-  // Labels / helpers
-  const stageShort = (count) => {
-    if (count === 1) return "F";
-    if (count === 2) return "SF";
-    if (count === 4) return "QF";
-    if (count === 8) return "R16";
-    if (count === 16) return "R32";
-    if (count === 32) return "R64";
-    return `R${count * 2}`;
+  // ---- helpers you already have or similar ----
+  const rounds = groupMatchesByRound(tn); // [{round, matches}]
+  if (!rounds.length) return alert("No matches to export.");
+  const teamMap = Object.fromEntries(tn.teams.map(t => [t.id, t.name]));
+
+  const short = (n) => {
+    if (!Number.isFinite(n) || n <= 0) return "R?";
+    if (n === 1) return "F";
+    if (n === 2) return "SF";
+    if (n === 4) return "QF";
+    if (n === 8) return "R16";
+    if (n === 16) return "R32";
+    if (n === 32) return "R64";
+    return `R${n * 2}`;
   };
-  const stageLong = (count) => stageLabelByCount(count) || `Round of ${count * 2}`;
-  const winnerOfLabel = (prevRoundMatchCount, prevMatchIndex) =>
-    `Winner of ${stageShort(prevRoundMatchCount)}${prevMatchIndex + 1}`;
+  const nameOf = (id) => teamMap[id] || (id ? "Unknown" : "BYE/TBD");
 
-  function nameForSlot(ri, mi, side) {
-    const currRound = allRounds[ri];
-    const m = currRound.matches[mi];
-    const id = side === "A" ? m.aId : m.bId;
-    if (id) return teamMap[id] || "Unknown";
-    if (ri > 0) {
-      const prevRound = allRounds[ri - 1];
-      const prevCount = prevRound.matches.length;
-      const prevIdx = side === "A" ? mi * 2 : mi * 2 + 1;
-      const prevM = prevRound.matches[prevIdx];
-      if (prevM) {
-        if (prevM.winnerId) return teamMap[prevM.winnerId] || "TBD";
-        return winnerOfLabel(prevCount, prevIdx);
-      }
-    }
-    return "BYE/TBD";
-  }
-  const statusText = (m) => {
-    if (m.status && String(m.status).trim()) return m.status;
-    const bothEmpty = !m.aId && !m.bId;
-    const singleBye = (!!m.aId && !m.bId) || (!m.aId && !!m.bId);
-    if (bothEmpty) return "Empty";
-    if (singleBye) return "BYE";
-    return "TBD";
-  };
-  const winnerText = (m) => (m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD");
-
-  // Layout constants (white theme)
-  const margin = 28;
-  const headerH = 60;
-
-  const colWidth = 320;
-  const boxW = 250;
-  const boxH = 84;
-  const innerPad = 10;
-  const elbowGapX = 24;
-  const radius = 12;
-
-  const slot0 = Math.max(130, boxH + 44); // base vertical spacing in Round 1
-
-  const roundX = (ri) => margin + ri * colWidth;
-  const roundSlot = (ri) => slot0 * Math.pow(2, ri);
-  const roundY = (ri, mi) =>
-    margin + headerH + mi * roundSlot(ri) + (roundSlot(ri) - boxH) / 2;
-
-  // Measure needed canvas size
-  let neededMaxY = margin + headerH + boxH;
-  let neededMaxX = margin + colWidth * allRounds.length;
-
-  for (let ri = 0; ri < allRounds.length; ri++) {
-    const count = allRounds[ri].matches.length;
-    for (let mi = 0; mi < count; mi++) {
-      const y = roundY(ri, mi);
-      const x = roundX(ri) + 8;
-      neededMaxY = Math.max(neededMaxY, y + boxH);
-      neededMaxX = Math.max(neededMaxX, x + boxW);
-      if (ri < allRounds.length - 1) {
-        const childMidX = x + boxW;
-        const childMidY = y + boxH / 2;
-        const parentY = roundY(ri + 1, Math.floor(mi / 2)) + boxH / 2;
-        neededMaxY = Math.max(neededMaxY, childMidY, parentY);
-        neededMaxX = Math.max(neededMaxX, childMidX + elbowGapX + (colWidth - 10));
-      }
-    }
-  }
-  const champBlockW = 200;
-  neededMaxX += champBlockW + 40;
-
-  const canvasW = Math.ceil(neededMaxX + margin);
-  const canvasH = Math.ceil(neededMaxY + margin + 18);
-
-  // Canvas (WHITE)
-  const canvas = document.createElement("canvas");
-  canvas.width = canvasW;
-  canvas.height = canvasH;
-  const ctx = canvas.getContext("2d");
-
-  // Background
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvasW, canvasH);
-
-  // Header
-  ctx.fillStyle = "#000000";
-  ctx.font = "bold 28px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-  ctx.textBaseline = "top";
-  ctx.fillText(`${tn.name} — Fixtures`, margin, margin);
-
-  // Faint horizontal guides
-  ctx.strokeStyle = "rgba(0,0,0,0.06)";
-  ctx.lineWidth = 1;
-  for (let y = margin + headerH; y <= canvasH - margin - 1; y += 48) {
-    ctx.beginPath();
-    ctx.moveTo(margin, y);
-    ctx.lineTo(canvasW - margin, y);
-    ctx.stroke();
+  // Given round index r, match index i => “Winner of QF1”, etc.
+  function placeholderWinnerText(rIdx, iIdx) {
+    const mcount = rounds[rIdx].matches.length;
+    const tag = short(mcount);
+    const n = iIdx + 1;
+    return `Winner of ${tag}${mcount === 1 ? "" : n}`;
   }
 
-  // Drawing helpers
-  function ellipsize(text, maxPx, font) {
-    ctx.save();
-    ctx.font = font;
-    if (ctx.measureText(text).width <= maxPx) {
-      ctx.restore();
-      return text;
-    }
-    let s = text;
-    while (s.length > 1 && ctx.measureText(s + "…").width > maxPx) s = s.slice(0, -1);
-    ctx.restore();
-    return s + "…";
-  }
-  function roundedRect(x, y, w, h, r) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.lineTo(x + w - r, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-    ctx.lineTo(x + w, y + h - r);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    ctx.lineTo(x + r, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-    ctx.lineTo(x, y + r);
-    ctx.quadraticCurveTo(x, y, x + r, y);
-    ctx.closePath();
-  }
-  function drawMatchCard(x, y, w, h, titleLeft, titleRight, line2Left, line2Right) {
-    ctx.fillStyle = "rgba(0,0,0,0.03)";
-    roundedRect(x, y, w, h, radius);
-    ctx.fill();
-    ctx.strokeStyle = "rgba(0,0,0,0.20)";
-    ctx.stroke();
+  // Label A/B for pending matches (when aId/bId absent)
+  function entryLabel(rIdx, iIdx, side /* 'a'|'b' */, m) {
+    const id = side === 'a' ? m.aId : m.bId;
+    if (id) return nameOf(id);
 
-    const textMax = w - innerPad * 2;
-
-    ctx.font = "600 12px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "rgba(0,0,0,0.85)";
-    ctx.textBaseline = "top";
-    const l = ellipsize(titleLeft, textMax * 0.5, ctx.font);
-    const r = ellipsize(titleRight, textMax * 0.5, ctx.font);
-    ctx.fillText(l, x + innerPad, y + innerPad);
-    const rW = ctx.measureText(r).width;
-    ctx.fillText(r, x + w - innerPad - rW, y + innerPad);
-
-    ctx.font = "bold 14px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "#000000";
-    ctx.fillText(ellipsize(line2Left, textMax, ctx.font), x + innerPad, y + innerPad + 18);
-
-    ctx.font = "12px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "rgba(0,0,0,0.60)";
-    ctx.fillText("vs", x + innerPad, y + innerPad + 36);
-
-    ctx.font = "bold 14px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "#000000";
-    ctx.fillText(ellipsize(line2Right, textMax, ctx.font), x + innerPad + 24, y + innerPad + 34);
-
-    const winnerY = y + h - innerPad - 14;
-    return { winnerY };
+    // If this side is empty and previous round exists,
+    // deduce the feeder match index.
+    if (rIdx === 0) return "BYE/TBD";
+    const feeder = Math.min(rounds[rIdx - 1].matches.length - 1, (iIdx * 2) + (side === 'a' ? 0 : 1));
+    return placeholderWinnerText(rIdx - 1, feeder);
   }
 
-  // Draw rounds + collect “no-cut” rectangles (for page tiling)
-  const noCutRects = []; // [{top,bottom}] in source canvas coordinates
+  // ----- PAGE + LAYOUT CONSTANTS -----
+  const pdf = new jsPDFCtor({ orientation: "landscape", unit: "pt", format: "a4" });
+  const PAGE_W = pdf.internal.pageSize.getWidth();
+  const PAGE_H = pdf.internal.pageSize.getHeight();
 
-  for (let ri = 0; ri < allRounds.length; ri++) {
-    const thisRound = allRounds[ri];
-    const count = thisRound.matches.length;
-    const label = stageLong(count);
+  const MARGIN = 36;
+  const HEADER_H = 28;
+  const FOOTER_H = 0;
 
-    ctx.font = "700 14px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "rgba(0,0,0,0.85)";
-    ctx.fillText(label, roundX(ri), margin + headerH - 24);
+  const COL_W = 240;          // card width
+  const COL_GAP = 60;         // space between columns
+  const CARD_H = 46;          // card height
+  const CARD_GAP = 18;        // vertical gap between cards within a round slice
 
-    for (let mi = 0; mi < count; mi++) {
-      const m = thisRound.matches[mi];
-      const x = roundX(ri) + 8;
-      const y = roundY(ri, mi);
+  // fonts + colors
+  const ink = "#000000";
+  pdf.setTextColor(0, 0, 0);
 
-      const s = statusText(m);
-      const aName = nameForSlot(ri, mi, "A");
-      const bName = nameForSlot(ri, mi, "B");
-      const wName = winnerText(m);
+  // ----- TWO-PASS LAYOUT -----
+  // We paginate first (compute which matches land on which page and y),
+  // then render and finally draw connectors for endpoints on the same page.
+  const usableTop = MARGIN + HEADER_H + 10;
+  const usableBottom = PAGE_H - MARGIN - FOOTER_H;
+  const usableHeight = usableBottom - usableTop;
 
-      const { winnerY } = drawMatchCard(
-        x,
-        y,
-        boxW,
-        boxH,
-        `M${mi + 1}`,
-        `Status: ${s}`,
-        aName,
-        bName
-      );
+  // Compute x per column
+  const colXs = [];
+  for (let r = 0; r < rounds.length; r++) {
+    colXs.push(MARGIN + r * (COL_W + COL_GAP));
+  }
 
-      ctx.fillStyle = "rgba(0,0,0,0.85)";
-      ctx.font = "12px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-      ctx.fillText(
-        `Winner: ${ellipsize(wName, boxW - innerPad * 2, ctx.font)}`,
-        x + innerPad,
-        winnerY
-      );
+  // 1) Build page slices: pages[pageIndex] = { columns: Map(roundIdx -> [{iIdx, y}]) }
+  const pages = [];
+  let page = { columns: new Map() };
+  let colYs = new Array(rounds.length).fill(usableTop); // current y per col on this page
+  pages.push(page);
 
-      // Connector to next round
-      if (ri < allRounds.length - 1) {
-        const nextX = roundX(ri + 1) + 8;
-        const parentY = roundY(ri + 1, Math.floor(mi / 2)) + boxH / 2;
-        const childMidX = x + boxW;
-        const childMidY = y + boxH / 2;
+  for (let r = 0; r < rounds.length; r++) {
+    page.columns.set(r, []);
+  }
 
-        ctx.strokeStyle = "rgba(0,0,0,0.45)";
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(childMidX, childMidY);
-        ctx.lineTo(childMidX + elbowGapX, childMidY);
-        ctx.lineTo(childMidX + elbowGapX, parentY);
-        ctx.lineTo(nextX - 10, parentY);
-        ctx.stroke();
+  for (let r = 0; r < rounds.length; r++) {
+    const matches = rounds[r].matches;
+    for (let i = 0; i < matches.length; i++) {
+      // Need spacing between pairs for connector vertical mid alignment
+      // but we still keep a consistent per-card height + gap for no-cut layout
+      const need = CARD_H + CARD_GAP;
 
-        // connectors also shouldn't be cut right through their midpoints; add a slim no-cut band
-        const topC = Math.min(childMidY, parentY) - 2;
-        const botC = Math.max(childMidY, parentY) + 2;
-        noCutRects.push({ top: topC, bottom: botC });
+      // If it doesn't fit, start a new page and reset only this column's y
+      if (colYs[r] + need > usableBottom) {
+        // new page
+        page = { columns: new Map() };
+        pages.push(page);
+        colYs = colYs.map(() => usableTop);
+        for (let rr = 0; rr < rounds.length; rr++) page.columns.set(rr, []);
       }
 
-      // Add the card area (with small padding) to the no-cut list
-      noCutRects.push({ top: y - 2, bottom: y + boxH + 2 });
+      page.columns.get(r).push({ iIdx: i, y: colYs[r] });
+      colYs[r] += need;
     }
+    // After finishing a column, reset y for the next column back to top
+    // (so columns don't “stack” vertically)
+    colYs[r] = usableTop;
   }
 
-  // Champion block
-  const lastRound = allRounds[allRounds.length - 1];
-  const champ = lastRound.matches[0] && lastRound.matches[0].winnerId
-    ? (teamMap[lastRound.matches[0].winnerId] || "TBD")
-    : "TBD";
+  // 2) Render pass
+  function renderPage(pageIndex) {
+    if (pageIndex > 0) pdf.addPage();
+    // White background page
+    pdf.setFillColor(255, 255, 255);
+    pdf.rect(0, 0, PAGE_W, PAGE_H, "F");
 
-  const champX = roundX(allRounds.length - 1) + colWidth + 20;
-  const champY = roundY(allRounds.length - 1, 0) - 6;
+    // Header
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(16);
+    pdf.text(`${tn.name} — Fixtures`, MARGIN, MARGIN + 16);
 
-  ctx.font = "700 16px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-  ctx.fillStyle = "rgba(0,0,0,0.85)";
-  ctx.fillText("Champion", champX, champY);
+    // Draw columns
+    for (let r = 0; r < rounds.length; r++) {
+      const mcount = rounds[r].matches.length;
+      const label = short(mcount);
 
-  const cW = 200, cH = 64;
-  ctx.fillStyle = "rgba(0,180,120,0.12)";
-  roundedRect(champX, champY + 10, cW, cH, 12);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(0,180,120,0.45)";
-  ctx.stroke();
+      // Column header
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(12);
+      pdf.text(label, colXs[r], usableTop - 10);
 
-  ctx.font = "bold 16px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-  ctx.fillStyle = "#000000";
-  ctx.fillText(
-    (function () {
-      const maxTextW = cW - 16;
-      const f = "bold 16px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-      return ellipsize(champ, maxTextW, f);
-    })(),
-    champX + 8,
-    champY + 10 + (cH - 16) / 2 - 4
-  );
+      const items = pages[pageIndex].columns.get(r) || [];
+      for (const { iIdx, y } of items) {
+        const m = rounds[r].matches[iIdx];
 
-  // -------- PDF: width-scale + SAFE vertical tiling (snap to gaps) --------
-  try {
-    const pdf = new window.jspdf.jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
-    const pageW = pdf.internal.pageSize.getWidth();
-    const pageH = pdf.internal.pageSize.getHeight();
-    const pad = 18;
-    const maxW = pageW - pad * 2;
-    const maxH = pageH - pad * 2;
+        // Card
+        pdf.setDrawColor(0, 0, 0);
+        pdf.setLineWidth(0.8);
+        pdf.rect(colXs[r], y, COL_W, CARD_H, "S");
 
-    // scale so canvas width fits page
-    const scale = Math.min(1, maxW / canvas.width);
-    const tileSourceHeight = Math.floor(maxH / scale); // source pixels per page
+        // Labels
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(10);
 
-    const tCanvas = document.createElement("canvas");
-    tCanvas.width = canvas.width;
-    const tctx = tCanvas.getContext("2d");
+        const aTxt = entryLabel(r, iIdx, 'a', m);
+        const bTxt = entryLabel(r, iIdx, 'b', m);
+        const wTxt = m.winnerId ? nameOf(m.winnerId) : "TBD";
 
-    let sy = 0;
-    const minChunk = Math.min(tileSourceHeight * 0.6, 600); // prevent tiny pages
+        // First line (A)
+        pdf.text(aTxt, colXs[r] + 8, y + 16, { maxWidth: COL_W - 16 });
+        // Second line (B)
+        pdf.text(bTxt, colXs[r] + 8, y + 30, { maxWidth: COL_W - 16 });
 
-    function cutsThroughCard(y) {
-      // true if y falls inside any no-cut band
-      for (const r of noCutRects) {
-        if (y > r.top && y < r.bottom) return true;
+        // Right corner: match index label (e.g., QF3)
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(9);
+        const idxLabel = `${label}${mcount === 1 ? "" : (iIdx + 1)}`;
+        pdf.text(idxLabel, colXs[r] + COL_W - 8, y + 14, { align: "right" });
+
+        // Winner (small, bottom-right)
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9);
+        pdf.text(`W: ${wTxt}`, colXs[r] + COL_W - 8, y + CARD_H - 8, { align: "right", maxWidth: COL_W - 16 });
       }
-      return false;
     }
 
-    while (sy < canvas.height) {
-      // desired cut
-      let desired = Math.min(canvas.height, sy + tileSourceHeight);
+    // Connectors (only when both endpoints are on this page)
+    pdf.setDrawColor(0, 0, 0);
+    pdf.setLineWidth(0.7);
 
-      // snap cut DOWN to nearest safe gap
-      let cut = desired;
-      while (cut > sy + minChunk && cutsThroughCard(cut)) cut -= 2;
+    for (let r = 0; r < rounds.length - 1; r++) {
+      const left = pages[pageIndex].columns.get(r) || [];
+      const right = pages[pageIndex].columns.get(r + 1) || [];
 
-      // if still unsafe (or would produce too small slice), snap UP instead
-      if (cutsThroughCard(cut)) {
-        cut = desired;
-        while (cut < Math.min(canvas.height, sy + tileSourceHeight * 1.4) && cutsThroughCard(cut)) cut += 2;
-        // if STILL unsafe, as a last resort move down a tiny bit from current sy
-        if (cutsThroughCard(cut)) {
-          cut = Math.min(canvas.height, sy + tileSourceHeight);
-        }
+      // quick map of (r+1,i) -> y
+      const rightY = new Map(right.map(it => [it.iIdx, it.y]));
+
+      for (const { iIdx, y: yLeft } of left) {
+        const targetIdx = Math.floor(iIdx / 2);
+        if (!rightY.has(targetIdx)) continue; // target not on this page => skip to avoid cross-page cuts
+
+        const yRight = rightY.get(targetIdx);
+
+        const x1 = colXs[r] + COL_W;
+        const y1 = yLeft + CARD_H / 2;
+        const x2 = colXs[r + 1];
+        const y2 = yRight + CARD_H / 2;
+        const midX = (x1 + x2) / 2;
+
+        // ──┐ and ┌── style elbow connector
+        pdf.line(x1, y1, midX, y1);
+        pdf.line(midX, y1, midX, y2);
+        pdf.line(midX, y2, x2, y2);
       }
-
-      const sh = Math.max(1, Math.min(cut - sy, canvas.height - sy));
-      tCanvas.height = sh;
-
-      // copy the slice
-      tctx.fillStyle = "#ffffff";
-      tctx.fillRect(0, 0, tCanvas.width, tCanvas.height);
-      tctx.drawImage(canvas, 0, sy, canvas.width, sh, 0, 0, canvas.width, sh);
-
-      const img = tCanvas.toDataURL("image/png");
-      const w = canvas.width * scale;
-      const h = sh * scale;
-
-      if (sy > 0) pdf.addPage();
-      pdf.addImage(img, "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
-
-      sy += sh;
     }
 
-    pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
-  } catch (e) {
-    console.error("PDF export failed:", e);
-    alert("PDF export failed. Check console.");
+    // (Optional) footer page number
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(9);
+    pdf.text(`Page ${pageIndex + 1} of ${pages.length}`, PAGE_W - MARGIN, PAGE_H - MARGIN / 2, { align: "right" });
   }
+
+  for (let p = 0; p < pages.length; p++) renderPage(p);
+
+  // Save
+  const fname = `${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`;
+  pdf.save(fname);
 }
-
 
 
 // ---------- UI bits ----------

@@ -144,15 +144,16 @@ function exportTournamentToExcel(tn) {
 // ---------- Export: PDF ----------
 // ---------- Export: PDF (canvas-drawn bracket with connector lines incl. Champion) ----------
 // ---------- Export: PDF (full bracket with connector lines + placeholders) ----------
-// ---------- Export: PDF (full bracket with connector lines + placeholders) ----------
+// ---------- Export: PDF (white background, full bracket, no cropping) ----------
 async function exportTournamentToPDF(tn) {
   const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
 
   const groupedReal = groupMatchesByRound(tn);
   if (!groupedReal.length) return alert("No matches to export.");
 
-  const round1Count = groupedReal[0].matches.length;
-  const slots = Math.max(2, round1Count * 2);
+  // Build a complete bracket shape (virtual rounds + placeholders)
+  const round1Count = Math.max(1, groupedReal[0].matches.length);
+  const slots = Math.max(2, round1Count * 2);              // next power-of-two-ish span
   const totalRounds = Math.max(1, Math.round(Math.log2(slots)));
 
   const realByNum = new Map(groupedReal.map(({ round, matches }) => [round, matches]));
@@ -179,6 +180,7 @@ async function exportTournamentToPDF(tn) {
     );
   }
 
+  // Labels
   const stageShort = (count) => {
     if (count === 1) return "F";
     if (count === 2) return "SF";
@@ -189,11 +191,10 @@ async function exportTournamentToPDF(tn) {
     return `R${count * 2}`;
   };
   const stageLong = (count) => stageLabelByCount(count) || `Round of ${count * 2}`;
+  const winnerOfLabel = (prevRoundMatchCount, prevMatchIndex) =>
+    `Winner of ${stageShort(prevRoundMatchCount)}${prevMatchIndex + 1}`;
 
-  function winnerOfLabel(prevRoundMatchCount, prevMatchIndex) {
-    const tag = stageShort(prevRoundMatchCount);
-    return `Winner of ${tag}${prevMatchIndex + 1}`;
-  }
+  // Name resolution (show “Winner of …” placeholders)
   function nameForSlot(ri, mi, side) {
     const currRound = allRounds[ri];
     const m = currRound.matches[mi];
@@ -212,66 +213,83 @@ async function exportTournamentToPDF(tn) {
     }
     return "BYE/TBD";
   }
-  function statusText(m) {
+  const statusText = (m) => {
     if (m.status && String(m.status).trim()) return m.status;
     const bothEmpty = !m.aId && !m.bId;
     const singleBye = (!!m.aId && !m.bId) || (!m.aId && !!m.bId);
     if (bothEmpty) return "Empty";
     if (singleBye) return "BYE";
     return "TBD";
-  }
-  function winnerText(m) {
-    return m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD";
-  }
+  };
+  const winnerText = (m) => (m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD");
 
-  // ----- Layout constants -----
+  // ----- Layout (tuned for clarity + enough whitespace) -----
   const margin = 28;
   const headerH = 60;
 
-  const colWidth = 300;
-  const boxW = 240;
-  const boxH = 78;
+  const colWidth = 320;        // a bit wider for long placeholder text
+  const boxW = 250;
+  const boxH = 84;
   const innerPad = 10;
-  const elbowGapX = 22;
+  const elbowGapX = 24;
   const radius = 12;
 
-  const slot0 = Math.max(120, boxH + 36); // base vertical spacing in Round 1
+  const slot0 = Math.max(130, boxH + 44); // base vertical spacing in Round 1
 
-  // Coordinate helpers
+  // Coordinates
   const roundX = (ri) => margin + ri * colWidth;
   const roundSlot = (ri) => slot0 * Math.pow(2, ri);
-  const roundY = (ri, mi) => margin + headerH + mi * roundSlot(ri) + (roundSlot(ri) - boxH) / 2;
+  const roundY = (ri, mi) =>
+    margin + headerH + mi * roundSlot(ri) + (roundSlot(ri) - boxH) / 2;
 
-  // >>> FIX: compute exact canvas height based on ALL rounds/matches <<<
-  let neededMaxY = margin + headerH + boxH; // minimum
+  // ---- Compute needed canvas height/width (include connectors & champion) ----
+  let neededMaxY = margin + headerH + boxH;
+  let neededMaxX = margin + colWidth * allRounds.length;
+
   for (let ri = 0; ri < allRounds.length; ri++) {
     const count = allRounds[ri].matches.length;
     for (let mi = 0; mi < count; mi++) {
       const y = roundY(ri, mi);
+      const x = roundX(ri) + 8;
       neededMaxY = Math.max(neededMaxY, y + boxH);
+      neededMaxX = Math.max(neededMaxX, x + boxW);
+
+      // account for connector elbow reaching next round
+      if (ri < allRounds.length - 1) {
+        const childMidX = x + boxW;
+        const childMidY = y + boxH / 2;
+        const parentY = roundY(ri + 1, Math.floor(mi / 2)) + boxH / 2;
+        neededMaxY = Math.max(neededMaxY, childMidY, parentY);
+        neededMaxX = Math.max(neededMaxX, childMidX + elbowGapX + (colWidth - 10));
+      }
     }
   }
-  const canvasW = margin * 2 + colWidth * totalRounds + 200; // extra for Champion
-  const canvasH = Math.ceil(neededMaxY + margin + 16);       // bottom breathing room
 
-  // Create canvas
+  // Champion block to the right
+  const champBlockW = 200;
+  neededMaxX += champBlockW + 40;
+
+  const canvasW = Math.ceil(neededMaxX + margin);
+  const canvasH = Math.ceil(neededMaxY + margin + 18); // bottom breathing room
+
+  // Create canvas (WHITE background)
   const canvas = document.createElement("canvas");
   canvas.width = canvasW;
   canvas.height = canvasH;
   const ctx = canvas.getContext("2d");
 
-  // Background
-  ctx.fillStyle = "#0b1120";
+  // Background white
+  ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, canvasW, canvasH);
 
-  // Header
-  ctx.fillStyle = "#ffffff";
+  // Header (black)
+  ctx.fillStyle = "#000000";
   ctx.font = "bold 28px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
   ctx.textBaseline = "top";
   ctx.fillText(`${tn.name} — Fixtures`, margin, margin);
 
-  // Subtle guide lines
-  ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  // Subtle guides (light gray)
+  ctx.strokeStyle = "rgba(0,0,0,0.06)";
   ctx.lineWidth = 1;
   for (let y = margin + headerH; y <= canvasH - margin - 1; y += 48) {
     ctx.beginPath();
@@ -280,7 +298,7 @@ async function exportTournamentToPDF(tn) {
     ctx.stroke();
   }
 
-  // Drawing helpers
+  // Helpers
   function ellipsize(text, maxPx, font) {
     ctx.save();
     ctx.font = font;
@@ -289,9 +307,7 @@ async function exportTournamentToPDF(tn) {
       return text;
     }
     let s = text;
-    while (s.length > 1 && ctx.measureText(s + "…").width > maxPx) {
-      s = s.slice(0, -1);
-    }
+    while (s.length > 1 && ctx.measureText(s + "…").width > maxPx) s = s.slice(0, -1);
     ctx.restore();
     return s + "…";
   }
@@ -309,16 +325,17 @@ async function exportTournamentToPDF(tn) {
     ctx.closePath();
   }
   function drawMatchCard(x, y, w, h, titleLeft, titleRight, line2Left, line2Right) {
-    ctx.fillStyle = "rgba(255,255,255,0.06)";
+    // very light gray fill, darker gray border
+    ctx.fillStyle = "rgba(0,0,0,0.03)";
     roundedRect(x, y, w, h, radius);
     ctx.fill();
-    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.strokeStyle = "rgba(0,0,0,0.20)";
     ctx.stroke();
 
     const textMax = w - innerPad * 2;
 
     ctx.font = "600 12px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.fillStyle = "rgba(0,0,0,0.85)";
     ctx.textBaseline = "top";
     const l = ellipsize(titleLeft, textMax * 0.5, ctx.font);
     const r = ellipsize(titleRight, textMax * 0.5, ctx.font);
@@ -327,29 +344,29 @@ async function exportTournamentToPDF(tn) {
     ctx.fillText(r, x + w - innerPad - rW, y + innerPad);
 
     ctx.font = "bold 14px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "#ffffff";
-    ctx.fillText(ellipsize(line2Left, textMax, ctx.font), x + innerPad, y + innerPad + 16);
+    ctx.fillStyle = "#000000";
+    ctx.fillText(ellipsize(line2Left, textMax, ctx.font), x + innerPad, y + innerPad + 18);
 
     ctx.font = "12px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "rgba(255,255,255,0.75)";
-    ctx.fillText("vs", x + innerPad, y + innerPad + 34);
+    ctx.fillStyle = "rgba(0,0,0,0.60)";
+    ctx.fillText("vs", x + innerPad, y + innerPad + 36);
 
     ctx.font = "bold 14px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "#ffffff";
-    ctx.fillText(ellipsize(line2Right, textMax, ctx.font), x + innerPad + 24, y + innerPad + 32);
+    ctx.fillStyle = "#000000";
+    ctx.fillText(ellipsize(line2Right, textMax, ctx.font), x + innerPad + 24, y + innerPad + 34);
 
     const winnerY = y + h - innerPad - 14;
     return { winnerY };
   }
 
-  // Draw rounds
+  // Draw the rounds
   for (let ri = 0; ri < allRounds.length; ri++) {
     const thisRound = allRounds[ri];
     const count = thisRound.matches.length;
     const label = stageLong(count);
 
     ctx.font = "700 14px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.fillStyle = "rgba(0,0,0,0.85)";
     ctx.fillText(label, roundX(ri), margin + headerH - 24);
 
     for (let mi = 0; mi < count; mi++) {
@@ -362,14 +379,24 @@ async function exportTournamentToPDF(tn) {
       const bName = nameForSlot(ri, mi, "B");
       const wName = winnerText(m);
 
-      const titleLeft = `M${mi + 1}`;
-      const titleRight = `Status: ${s}`;
+      const { winnerY } = drawMatchCard(
+        x,
+        y,
+        boxW,
+        boxH,
+        `M${mi + 1}`,
+        `Status: ${s}`,
+        aName,
+        bName
+      );
 
-      const { winnerY } = drawMatchCard(x, y, boxW, boxH, titleLeft, titleRight, aName, bName);
-
-      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.fillStyle = "rgba(0,0,0,0.85)";
       ctx.font = "12px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-      ctx.fillText(`Winner: ${ellipsize(wName, boxW - innerPad * 2, ctx.font)}`, x + innerPad, winnerY);
+      ctx.fillText(
+        `Winner: ${ellipsize(wName, boxW - innerPad * 2, ctx.font)}`,
+        x + innerPad,
+        winnerY
+      );
 
       // connectors
       if (ri < allRounds.length - 1) {
@@ -379,7 +406,7 @@ async function exportTournamentToPDF(tn) {
         const childMidX = x + boxW;
         const childMidY = y + boxH / 2;
 
-        ctx.strokeStyle = "rgba(255,255,255,0.35)";
+        ctx.strokeStyle = "rgba(0,0,0,0.45)";
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(childMidX, childMidY);
@@ -391,31 +418,35 @@ async function exportTournamentToPDF(tn) {
     }
   }
 
-  // Champion block
+  // Champion block (right side)
   const lastRound = allRounds[allRounds.length - 1];
   const champ = lastRound.matches[0] && lastRound.matches[0].winnerId
     ? (teamMap[lastRound.matches[0].winnerId] || "TBD")
     : "TBD";
 
-  const champX = roundX(allRounds.length - 1) + colWidth;
+  const champX = roundX(allRounds.length - 1) + colWidth + 20;
   const champY = roundY(allRounds.length - 1, 0) - 6;
 
   ctx.font = "700 16px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  ctx.fillStyle = "rgba(0,0,0,0.85)";
   ctx.fillText("Champion", champX, champY);
 
-  const cW = 180, cH = 60;
-  ctx.fillStyle = "rgba(0,255,160,0.12)";
+  const cW = 200, cH = 64;
+  ctx.fillStyle = "rgba(0,180,120,0.12)";
   roundedRect(champX, champY + 10, cW, cH, 12);
   ctx.fill();
-  ctx.strokeStyle = "rgba(0,255,160,0.45)";
+  ctx.strokeStyle = "rgba(0,180,120,0.45)";
   ctx.stroke();
 
   ctx.font = "bold 16px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-  ctx.fillStyle = "#ffffff";
-  ctx.fillText(ellipsize(champ, cW - 16, ctx.font), champX + 8, champY + 10 + (cH - 16) / 2 - 4);
+  ctx.fillStyle = "#000000";
+  ctx.fillText(
+    ellipsize(champ, cW - 16, ctx.font),
+    champX + 8,
+    champY + 10 + (cH - 16) / 2 - 4
+  );
 
-  // Export to PDF
+  // Export to PDF (auto-scale to fit page)
   try {
     const img = canvas.toDataURL("image/png");
     const pdf = new window.jspdf.jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });

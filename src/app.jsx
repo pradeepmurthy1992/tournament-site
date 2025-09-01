@@ -148,80 +148,274 @@ function buildProjectedRounds(tn) {
 function feederLabel(roundMatchesCount, i0) { return `${stageShort(roundMatchesCount)}${i0 + 1}`; }
 function placeholderName(prevCount, childIndex) { return `Winner of ${feederLabel(prevCount, childIndex)}`; }
 
-async function exportTournamentToPDF(tn) {
-  const jsPDFCtor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF || (window.jspdf && window.jspdf.default);
-  if (!jsPDFCtor) return alert("jsPDF not found. Include jspdf.umd.min.js");
-  const rounds = buildProjectedRounds(tn); if (!rounds.length) return alert("No matches to export.");
-  const pdf = new jsPDFCtor({ orientation: "landscape", unit: "pt", format: "a4" });
-  const pageW = pdf.internal.pageSize.getWidth(), pageH = pdf.internal.pageSize.getHeight(), margin = 36;
-  const BG = "#ffffff", FG = "#000000", LINE = "#000000";
-  const title = `${tn.name} — Fixtures`;
-  pdf.setFillColor(BG); pdf.rect(0, 0, pageW, pageH, "F"); pdf.setTextColor(FG); pdf.setFont("helvetica", "bold"); pdf.setFontSize(18); pdf.text(title, margin, margin + 6);
+/* ===== Helpers for PDF numbering and rich text ===== */
+function buildMatchNumbering(rounds) {
+  // Returns: { matchNoById, idByRoundIndex, childNosByParentIndex }
+  // matchNo is assigned sequentially across all projected rounds (R1..Final)
+  const matchNoById = new Map();
+  const idByRoundIndex = rounds.map(r => r.matches.map(m => m.id));
+  let counter = 1;
+  for (let r = 0; r < rounds.length; r++) {
+    for (const m of rounds[r].matches) {
+      matchNoById.set(m.id, counter++);
+    }
+  }
+  // Precompute child match numbers for each parent (from r-1)
+  const childNosByParentIndex = new Map(); // key `${r}:${i}` -> [c1No, c2No]
+  for (let r = 1; r < rounds.length; r++) {
+    const children = idByRoundIndex[r - 1];
+    for (let i = 0; i < rounds[r].matches.length; i++) {
+      const c1Id = children[i * 2];
+      const c2Id = children[i * 2 + 1];
+      const c1No = c1Id != null ? matchNoById.get(c1Id) : null;
+      const c2No = c2Id != null ? matchNoById.get(c2Id) : null;
+      childNosByParentIndex.set(`${r}:${i}`, [c1No, c2No]);
+    }
+  }
+  return { matchNoById, idByRoundIndex, childNosByParentIndex };
+}
 
-  const colGap = 44, boxW = 210, boxH0 = 34, vGap0 = 16, strokeW = 1.2;
+function drawRichLine(pdf, x, y, parts, opt) {
+  // parts: [{text, bold?:boolean, strike?:boolean}]
+  // opt: { font: "helvetica", size: 11, color: "#000000", strikeYOffset?: number }
+  const { font = "helvetica", size = 11, color = "#000000", strikeYOffset = -2 } = opt || {};
+  pdf.setTextColor(color);
+  let cursor = x;
+  for (const p of parts) {
+    const style = p.bold ? "bold" : "normal";
+    pdf.setFont(font, style);
+    pdf.setFontSize(size);
+    const w = pdf.getTextWidth(p.text);
+    pdf.text(p.text, cursor, y);
+    if (p.strike) {
+      // Draw a strike-through line across this token
+      const thickness = Math.max(0.6, size * 0.06);
+      const midY = y + strikeYOffset;
+      pdf.setLineWidth(thickness);
+      pdf.line(cursor, midY, cursor + w, midY);
+    }
+    cursor += w;
+  }
+}
+
+/* ===== Reworked exportTournamentToPDF ===== */
+async function exportTournamentToPDF(tn) {
+  const jsPDFCtor =
+    (window.jspdf && window.jspdf.jsPDF) ||
+    window.jsPDF ||
+    (window.jspdf && window.jspdf.default);
+  if (!jsPDFCtor) {
+    alert("jsPDF not found. Include jspdf.umd.min.js");
+    return;
+  }
+
+  // Build projected rounds (pads missing slots so child references exist)
+  const rounds = buildProjectedRounds(tn);
+  if (!rounds.length) {
+    alert("No matches to export.");
+    return;
+  }
+
+  // Precompute numbering and child links
+  const { matchNoById, childNosByParentIndex } = buildMatchNumbering(rounds);
+
+  const pdf = new jsPDFCtor({ orientation: "landscape", unit: "pt", format: "a4" });
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const margin = 36;
+
+  // Colors / styles
+  const BG = "#ffffff";
+  const FG = "#000000";
+  const LINE = "#000000";
+
+  // Title
+  const title = `${tn.name} — Fixtures`;
+  pdf.setFillColor(BG);
+  pdf.rect(0, 0, pageW, pageH, "F");
+  pdf.setTextColor(FG);
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(18);
+  pdf.text(title, margin, margin + 6);
+
+  // Layout params
+  const colGap = 44;
+  const boxW = 210;
+  const boxH0 = 42;   // little taller for one-line content
+  const vGap0 = 16;
+  const strokeW = 1.2;
+
   const colWidths = rounds.map((_, rIdx) => boxW * Math.max(0.75, 1 - rIdx * 0.08));
   const roundHeights = rounds.map((_, rIdx) => boxH0 + rIdx * 4);
   const roundVGaps = rounds.map((_, rIdx) => vGap0 * Math.pow(2, rIdx));
 
-  const colX = []; let totalW = 0;
+  // Column x
+  const colX = [];
+  let totalW = 0;
   for (let r = 0; r < rounds.length; r++) {
-    colX[r] = r === 0 ? 0 : colX[r - 1] + colWidths[r - 1] + colGap;
-    totalW += (r === 0 ? colWidths[r] : colGap + colWidths[r]);
+    if (r === 0) {
+      colX[r] = 0;
+      totalW += colWidths[r];
+    } else {
+      colX[r] = colX[r - 1] + colWidths[r - 1] + colGap;
+      totalW += colGap + colWidths[r];
+    }
   }
 
   const r1Count = rounds[0].matches.length;
   const bodyH = r1Count * roundHeights[0] + (r1Count - 1) * roundVGaps[0];
-  const maxW = pageW - margin * 2, maxH = pageH - (margin * 2 + 18 + 10);
-  const scale = Math.min(1, maxW / totalW, maxH / bodyH);
-  const originX = margin, originY = margin + 24, S = (n) => n * scale;
-  const teamMap = Object.fromEntries((tn.teams || []).map(t => [t.id, t.name]));
 
+  const maxW = pageW - margin * 2;
+  const maxH = pageH - (margin * 2 + 18 + 10);
+  const scale = Math.min(1, maxW / totalW, maxH / bodyH);
+
+  const originX = margin;
+  const originY = margin + 24;
+  const S = (n) => n * scale;
+
+  const teamMap = Object.fromEntries((tn.teams || []).map((t) => [t.id, t.name]));
+
+  // Cache positions: pos[r][i] = {x,y,w,h}
   const pos = rounds.map((r, rIdx) => {
-    const matches = r.matches, thisBoxH = roundHeights[rIdx], thisVGap = roundVGaps[rIdx]; const arr = [];
-    if (rIdx === 0) { let y = 0; for (let i = 0; i < matches.length; i++) { arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH }); y += thisBoxH + thisVGap; } }
-    else {
-      const prevBoxH = roundHeights[rIdx - 1], prevVGap = roundVGaps[rIdx - 1];
-      const childBlockH = prevBoxH + prevVGap, myBlockH = childBlockH * 2 - prevVGap; let y = (myBlockH - thisBoxH) / 2;
-      for (let i = 0; i < matches.length; i++) { arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH }); y += myBlockH; }
+    const matches = r.matches;
+    const thisBoxH = roundHeights[rIdx];
+    const thisVGap = roundVGaps[rIdx];
+
+    const arr = [];
+    if (rIdx === 0) {
+      let y = 0;
+      for (let i = 0; i < matches.length; i++) {
+        arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH });
+        y += thisBoxH + thisVGap;
+      }
+    } else {
+      const prevBoxH = roundHeights[rIdx - 1];
+      const prevVGap = roundVGaps[rIdx - 1];
+      const childBlockH = prevBoxH + prevVGap;
+      const myBlockH = childBlockH * 2 - prevVGap;
+      let y = (myBlockH - thisBoxH) / 2;
+      for (let i = 0; i < matches.length; i++) {
+        arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH });
+        y += myBlockH;
+      }
     }
     return arr;
   });
 
-  const boxText = (rIdx, iIdx, side, m) => {
-    if (rIdx === 0) return playerName(teamMap, side === "a" ? m.aId : m.bId);
-    const prevCount = rounds[rIdx - 1].matches.length; const childIndex = iIdx * 2 + (side === "a" ? 0 : 1);
-    return placeholderName(prevCount, childIndex);
-  };
-  const winTxt = (m) => (m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD");
+  // Drawing
+  pdf.setLineWidth(strokeW);
+  pdf.setDrawColor(LINE);
 
-  pdf.setLineWidth(strokeW); pdf.setDrawColor(LINE); pdf.setFont("helvetica", "normal");
+  // Utility: resolve participant display for a match at (r,i)
+  const getParticipantsLine = (rIdx, iIdx, m) => {
+    // If this round depends on children, either show winners (if known) or placeholders
+    if (rIdx > 0) {
+      const [c1No, c2No] = childNosByParentIndex.get(`${rIdx}:${iIdx}`) || [null, null];
+      const childRound = rounds[rIdx - 1];
+      const c1 = childRound?.matches?.[iIdx * 2];
+      const c2 = childRound?.matches?.[iIdx * 2 + 1];
+
+      const c1WinnerName = c1?.winnerId ? (teamMap[c1.winnerId] || "TBD") : null;
+      const c2WinnerName = c2?.winnerId ? (teamMap[c2.winnerId] || "TBD") : null;
+
+      const bothKnown = !!(c1WinnerName && c2WinnerName && c1.winnerId && c2.winnerId);
+
+      if (!bothKnown) {
+        const left = c1No ? `M${c1No}` : "?";
+        const right = c2No ? `M${c2No}` : "?";
+        return { type: "placeholder", text: `[Winner of ${left} Vs ${right}]` };
+      }
+      return { type: "names", a: c1WinnerName, aId: c1.winnerId, b: c2WinnerName, bId: c2.winnerId };
+    }
+
+    // Round 1: use direct players (may be BYE/TBD)
+    const aName = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
+    const bName = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
+    return { type: "names", a: aName, aId: m.aId, b: bName, bId: m.bId };
+  };
+
   for (let r = 0; r < rounds.length; r++) {
-    const matches = rounds[r].matches, code = stageShort(matches.length), thisBoxH = roundHeights[r];
+    const matches = rounds[r].matches;
+
     for (let i = 0; i < matches.length; i++) {
-      const m = matches[i], p = pos[r][i], pad = 6 * scale;
+      const m = matches[i];
+      const p = pos[r][i];
+
+      // Box
       pdf.rect(originX + S(p.x), originY + S(p.y), S(p.w), S(p.h), "S");
-      pdf.setFont("helvetica", "bold"); pdf.setFontSize(10 * scale);
-      pdf.text(code, originX + S(p.x) + pad, originY + S(p.y) + pad + 8 * scale);
-      pdf.setFont("helvetica", "normal"); pdf.setFontSize(10 * scale);
-      const aY = originY + S(p.y) + pad + 18 * scale, bY = originY + S(p.y) + pad + 34 * scale;
-      pdf.text(boxText(r, i, "a", m), originX + S(p.x) + pad, aY);
-      pdf.text(boxText(r, i, "b", m), originX + S(p.x) + pad, bY);
-      pdf.setFontSize(9 * scale);
-      pdf.text(`Winner: ${winTxt(m)}`, originX + S(p.x) + pad, originY + S(p.y + thisBoxH) - pad);
+
+      const pad = 6 * scale;
+      const titleY = originY + S(p.y) + pad + 10 * scale;
+      const lineY = originY + S(p.y) + S(p.h) / 2 + 3 * scale;
+
+      // Match label: "Match M#"
+      const mNo = matchNoById.get(m.id);
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(10 * scale);
+      pdf.setTextColor(FG);
+      pdf.text(`Match M${mNo}`, originX + S(p.x) + pad, titleY);
+
+      // Participants / Placeholder line
+      const info = getParticipantsLine(r, i, m);
+
+      if (info.type === "placeholder") {
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(11 * scale);
+        pdf.setTextColor(FG);
+        // Center-ish left-aligned inside the box (keeping left pad, but you can center if you prefer)
+        pdf.text(info.text, originX + S(p.x) + pad, lineY);
+      } else {
+        // Single line: "A Vs B"
+        const winnerId = m.winnerId || null;
+
+        const leftIsWinner = winnerId && winnerId === info.aId;
+        const rightIsWinner = winnerId && winnerId === info.bId;
+
+        const parts = [
+          { text: info.a || "TBD", bold: !!leftIsWinner, strike: !!(winnerId && !leftIsWinner && info.a && info.a !== "BYE/TBD") },
+          { text: "  Vs  ", bold: false, strike: false },
+          { text: info.b || "TBD", bold: !!rightIsWinner, strike: !!(winnerId && !rightIsWinner && info.b && info.b !== "BYE/TBD") },
+        ];
+
+        // Slightly bigger for main line
+        drawRichLine(pdf, originX + S(p.x) + pad, lineY, parts, { size: 11 * scale, color: FG });
+      }
     }
   }
+
+  // Connectors (unchanged)
   for (let r = 0; r < rounds.length - 1; r++) {
-    const child = pos[r], parent = pos[r + 1];
+    const child = pos[r];
+    const parent = pos[r + 1];
+
     for (let i = 0; i < parent.length; i++) {
-      const p = parent[i], c1 = child[i * 2], c2 = child[i * 2 + 1]; if (!c1 || !c2) continue;
-      const c1x = originX + S(c1.x + c1.w), c2x = originX + S(c2.x + c2.w);
-      const c1y = originY + S(c1.y + c1.h / 2), c2y = originY + S(c2.y + c2.h / 2);
-      const px = originX + S(p.x), py = originY + S(p.y + p.h / 2), midX = px - 10 * scale;
-      pdf.line(c1x, c1y, midX, c1y); pdf.line(c2x, c2y, midX, c2y); pdf.line(midX, c1y, midX, c2y); pdf.line(midX, py, px, py);
+      const p = parent[i];
+      const c1 = child[i * 2];
+      const c2 = child[i * 2 + 1];
+      if (!c1 || !c2) continue;
+
+      const c1x = originX + S(c1.x + c1.w);
+      const c2x = originX + S(c2.x + c2.w);
+      const c1y = originY + S(c1.y + c1.h / 2);
+      const c2y = originY + S(c2.y + c2.h / 2);
+
+      const px = originX + S(p.x);
+      const py = originY + S(p.y + p.h / 2);
+
+      const midX = px - 10 * scale;
+
+      pdf.setDrawColor(LINE);
+      pdf.setLineWidth(strokeW);
+      pdf.line(c1x, c1y, midX, c1y);
+      pdf.line(c2x, c2y, midX, c2y);
+      pdf.line(midX, c1y, midX, c2y);
+      pdf.line(midX, py, px, py);
     }
   }
+
   pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
 }
+
 
 /* ---------------- Dark themed custom select (mobile + desktop) ---------------- */
 function DarkSelect({

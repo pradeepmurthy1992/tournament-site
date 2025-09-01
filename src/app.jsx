@@ -199,6 +199,44 @@ function drawRichLine(pdf, x, y, parts, opt) {
 }
 
 /* ===== Reworked exportTournamentToPDF ===== */
+/* ===== Updated helpers (centered strike, rich text) ===== */
+function drawRichLine(pdf, x, y, parts, opt) {
+  // parts: [{text, bold?:boolean, strike?:boolean}]
+  // opt: { font: "helvetica", size: 11, color: "#000000" }
+  const { font = "helvetica", size = 11, color = "#000000" } = opt || {};
+  pdf.setTextColor(color);
+  let cursor = x;
+
+  for (const p of parts) {
+    const style = p.bold ? "bold" : "normal";
+    pdf.setFont(font, style);
+    pdf.setFontSize(size);
+
+    const text = p.text ?? "";
+    const w = pdf.getTextWidth(text);
+    // baseline text
+    pdf.text(text, cursor, y);
+
+    if (p.strike && w > 0) {
+      // Center the strike through the visual middle of the glyphs
+      // Baseline at y; approximate midline ~ y - 0.33 * size (works well for Helvetica)
+      const midY = y - size * 0.33;
+      const thickness = Math.max(0.6, size * 0.065);
+      const prevLW = pdf.getLineWidth();
+      pdf.setLineWidth(thickness);
+      pdf.line(cursor, midY, cursor + w, midY);
+      pdf.setLineWidth(prevLW);
+    }
+    cursor += w;
+  }
+}
+
+/* Pretty line builder */
+function buildParts(text, { bold = false, strike = false } = {}) {
+  return [{ text, bold, strike }];
+}
+
+/* ===== Reworked exportTournamentToPDF (two-line layout + thin borders) ===== */
 async function exportTournamentToPDF(tn) {
   const jsPDFCtor =
     (window.jspdf && window.jspdf.jsPDF) ||
@@ -209,41 +247,42 @@ async function exportTournamentToPDF(tn) {
     return;
   }
 
-  // Build projected rounds (pads missing slots so child references exist)
   const rounds = buildProjectedRounds(tn);
   if (!rounds.length) {
     alert("No matches to export.");
     return;
   }
 
-  // Precompute numbering and child links
-  const { matchNoById, childNosByParentIndex } = buildMatchNumbering(rounds);
+  // Assign sequential match numbers across all rounds (R1..Final)
+  const matchNoById = new Map();
+  let mCounter = 1;
+  for (const r of rounds) for (const m of r.matches) matchNoById.set(m.id, mCounter++);
+
+  // Quick lookup for team names
+  const teamMap = Object.fromEntries((tn.teams || []).map((t) => [t.id, t.name]));
 
   const pdf = new jsPDFCtor({ orientation: "landscape", unit: "pt", format: "a4" });
   const pageW = pdf.internal.pageSize.getWidth();
   const pageH = pdf.internal.pageSize.getHeight();
   const margin = 36;
 
-  // Colors / styles
+  // Colors / styles (white background, black text/lines)
   const BG = "#ffffff";
   const FG = "#000000";
-  const LINE = "#000000";
 
   // Title
-  const title = `${tn.name} — Fixtures`;
   pdf.setFillColor(BG);
   pdf.rect(0, 0, pageW, pageH, "F");
   pdf.setTextColor(FG);
   pdf.setFont("helvetica", "bold");
   pdf.setFontSize(18);
-  pdf.text(title, margin, margin + 6);
+  pdf.text(`${tn.name} — Fixtures`, margin, margin + 6);
 
-  // Layout params
+  // Layout “virtual space” then scale-to-fit
   const colGap = 44;
   const boxW = 210;
-  const boxH0 = 42;   // little taller for one-line content
+  const boxH0 = 54;        // taller to fit two lines nicely
   const vGap0 = 16;
-  const strokeW = 1.2;
 
   const colWidths = rounds.map((_, rIdx) => boxW * Math.max(0.75, 1 - rIdx * 0.08));
   const roundHeights = rounds.map((_, rIdx) => boxH0 + rIdx * 4);
@@ -264,7 +303,6 @@ async function exportTournamentToPDF(tn) {
 
   const r1Count = rounds[0].matches.length;
   const bodyH = r1Count * roundHeights[0] + (r1Count - 1) * roundVGaps[0];
-
   const maxW = pageW - margin * 2;
   const maxH = pageH - (margin * 2 + 18 + 10);
   const scale = Math.min(1, maxW / totalW, maxH / bodyH);
@@ -272,8 +310,6 @@ async function exportTournamentToPDF(tn) {
   const originX = margin;
   const originY = margin + 24;
   const S = (n) => n * scale;
-
-  const teamMap = Object.fromEntries((tn.teams || []).map((t) => [t.id, t.name]));
 
   // Cache positions: pos[r][i] = {x,y,w,h}
   const pos = rounds.map((r, rIdx) => {
@@ -302,38 +338,35 @@ async function exportTournamentToPDF(tn) {
     return arr;
   });
 
-  // Drawing
-  pdf.setLineWidth(strokeW);
-  pdf.setDrawColor(LINE);
+  // Thin, uniform border everywhere (boxes + connectors)
+  const BOX_LINE_W = Math.max(0.6, 0.6 * scale); // minimal & uniform
+  const CONN_LINE_W = BOX_LINE_W;
 
-  // Utility: resolve participant display for a match at (r,i)
-  const getParticipantsLine = (rIdx, iIdx, m) => {
-    // If this round depends on children, either show winners (if known) or placeholders
-    if (rIdx > 0) {
-      const [c1No, c2No] = childNosByParentIndex.get(`${rIdx}:${iIdx}`) || [null, null];
-      const childRound = rounds[rIdx - 1];
-      const c1 = childRound?.matches?.[iIdx * 2];
-      const c2 = childRound?.matches?.[iIdx * 2 + 1];
+  /* --- utilities --- */
+  const getChildWinnersOrPlaceholders = (rIdx, iIdx) => {
+    const childRound = rounds[rIdx - 1];
+    const left = childRound?.matches?.[iIdx * 2];
+    const right = childRound?.matches?.[iIdx * 2 + 1];
+    const leftNo = left ? matchNoById.get(left.id) : null;
+    const rightNo = right ? matchNoById.get(right.id) : null;
 
-      const c1WinnerName = c1?.winnerId ? (teamMap[c1.winnerId] || "TBD") : null;
-      const c2WinnerName = c2?.winnerId ? (teamMap[c2.winnerId] || "TBD") : null;
+    const leftWinner = left?.winnerId ? (teamMap[left.winnerId] || "TBD") : null;
+    const rightWinner = right?.winnerId ? (teamMap[right.winnerId] || "TBD") : null;
 
-      const bothKnown = !!(c1WinnerName && c2WinnerName && c1.winnerId && c2.winnerId);
-
-      if (!bothKnown) {
-        const left = c1No ? `M${c1No}` : "?";
-        const right = c2No ? `M${c2No}` : "?";
-        return { type: "placeholder", text: `[Winner of ${left} Vs ${right}]` };
-      }
-      return { type: "names", a: c1WinnerName, aId: c1.winnerId, b: c2WinnerName, bId: c2.winnerId };
+    if (leftWinner && rightWinner) {
+      return { type: "names", a: leftWinner, aId: left.winnerId, b: rightWinner, bId: right.winnerId };
     }
-
-    // Round 1: use direct players (may be BYE/TBD)
-    const aName = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
-    const bName = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
-    return { type: "names", a: aName, aId: m.aId, b: bName, bId: m.bId };
+    // placeholder single line stays as requested
+    return { type: "placeholder", text: `[Winner of M${leftNo ?? "?"} Vs M${rightNo ?? "?"}]` };
   };
 
+  const getRound1Names = (m) => {
+    const a = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
+    const b = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
+    return { type: "names", a, aId: m.aId, b, bId: m.bId };
+  };
+
+  // Draw everything
   for (let r = 0; r < rounds.length; r++) {
     const matches = rounds[r].matches;
 
@@ -342,48 +375,58 @@ async function exportTournamentToPDF(tn) {
       const p = pos[r][i];
 
       // Box
+      pdf.setDrawColor(0);
+      pdf.setLineWidth(BOX_LINE_W);
       pdf.rect(originX + S(p.x), originY + S(p.y), S(p.w), S(p.h), "S");
 
-      const pad = 6 * scale;
-      const titleY = originY + S(p.y) + pad + 10 * scale;
-      const lineY = originY + S(p.y) + S(p.h) / 2 + 3 * scale;
+      const padX = 6 * scale;
+      const padTop = 6 * scale;
 
-      // Match label: "Match M#"
-      const mNo = matchNoById.get(m.id);
+      // Lines Y positions (with small gaps)
+      const titleY = originY + S(p.y) + padTop + 10 * scale;     // "Match M#"
+      const gapAfterTitle = 3 * scale;                            // small gap after "Match M#"
+      const line1Y = titleY + gapAfterTitle + 11 * scale;         // first participant line
+      const gapBetweenLines = 3 * scale;                          // small gap between lines
+      const line2Y = line1Y + gapBetweenLines + 11 * scale;       // second participant line
+
+      // Label: "Match M#"
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(10 * scale);
       pdf.setTextColor(FG);
-      pdf.text(`Match M${mNo}`, originX + S(p.x) + pad, titleY);
+      pdf.text(`Match M${matchNoById.get(m.id)}`, originX + S(p.x) + padX, titleY);
 
-      // Participants / Placeholder line
-      const info = getParticipantsLine(r, i, m);
+      const info = r === 0 ? getRound1Names(m) : getChildWinnersOrPlaceholders(r, i);
 
       if (info.type === "placeholder") {
+        // Single line centered-ish left (you can fully center if wanted)
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(11 * scale);
         pdf.setTextColor(FG);
-        // Center-ish left-aligned inside the box (keeping left pad, but you can center if you prefer)
-        pdf.text(info.text, originX + S(p.x) + pad, lineY);
+        pdf.text(info.text, originX + S(p.x) + padX, line1Y);
+        // nothing on second line for placeholders
       } else {
-        // Single line: "A Vs B"
         const winnerId = m.winnerId || null;
 
         const leftIsWinner = winnerId && winnerId === info.aId;
         const rightIsWinner = winnerId && winnerId === info.bId;
 
-        const parts = [
-          { text: info.a || "TBD", bold: !!leftIsWinner, strike: !!(winnerId && !leftIsWinner && info.a && info.a !== "BYE/TBD") },
-          { text: "  Vs  ", bold: false, strike: false },
-          { text: info.b || "TBD", bold: !!rightIsWinner, strike: !!(winnerId && !rightIsWinner && info.b && info.b !== "BYE/TBD") },
+        // Line 1: "<Name A>  VS"
+        const line1Parts = [
+          ...buildParts(info.a || "TBD", { bold: !!leftIsWinner, strike: !!(winnerId && !leftIsWinner && info.a && info.a !== "BYE/TBD") }),
+          { text: "  VS", bold: false, strike: false },
         ];
+        drawRichLine(pdf, originX + S(p.x) + padX, line1Y, line1Parts, { size: 11 * scale, color: FG });
 
-        // Slightly bigger for main line
-        drawRichLine(pdf, originX + S(p.x) + pad, lineY, parts, { size: 11 * scale, color: FG });
+        // Line 2: "Name B"
+        const line2Parts = [
+          ...buildParts(info.b || "TBD", { bold: !!rightIsWinner, strike: !!(winnerId && !rightIsWinner && info.b && info.b !== "BYE/TBD") })
+        ];
+        drawRichLine(pdf, originX + S(p.x) + padX, line2Y, line2Parts, { size: 11 * scale, color: FG });
       }
     }
   }
 
-  // Connectors (unchanged)
+  // Connectors (thin & consistent)
   for (let r = 0; r < rounds.length - 1; r++) {
     const child = pos[r];
     const parent = pos[r + 1];
@@ -404,8 +447,8 @@ async function exportTournamentToPDF(tn) {
 
       const midX = px - 10 * scale;
 
-      pdf.setDrawColor(LINE);
-      pdf.setLineWidth(strokeW);
+      pdf.setDrawColor(0);
+      pdf.setLineWidth(CONN_LINE_W);
       pdf.line(c1x, c1y, midX, c1y);
       pdf.line(c2x, c2y, midX, c2y);
       pdf.line(midX, c1y, midX, c2y);
@@ -415,6 +458,7 @@ async function exportTournamentToPDF(tn) {
 
   pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
 }
+
 
 
 /* ---------------- Dark themed custom select (mobile + desktop) ---------------- */

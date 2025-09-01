@@ -31,26 +31,17 @@ function uniqueNames(arr) {
   const out = [];
   for (const n of arr.map((s) => String(s || "").trim()).filter(Boolean)) {
     const k = n.toLowerCase();
-    if (!seen.has(k)) {
-      seen.add(k);
-      out.push(n);
-    }
+    if (!seen.has(k)) { seen.add(k); out.push(n); }
   }
   return out;
 }
 function findDuplicateNamesCaseInsensitive(arr) {
-  const seen = new Map(); // key(lower) -> original
+  const seen = new Map();
   const dups = new Set();
   for (const raw of arr) {
-    const s = String(raw || "").trim();
-    if (!s) continue;
+    const s = String(raw || "").trim(); if (!s) continue;
     const k = s.toLowerCase();
-    if (seen.has(k)) {
-      dups.add(seen.get(k));
-      dups.add(s);
-    } else {
-      seen.set(k, s);
-    }
+    if (seen.has(k)) { dups.add(seen.get(k)); dups.add(s); } else { seen.set(k, s); }
   }
   return Array.from(dups);
 }
@@ -85,40 +76,22 @@ async function parseExcelPlayers(arrayBuffer) {
   }
 }
 
-function timeStr(ts) {
-  try {
-    const d = new Date(ts);
-    return d.toLocaleString();
-  } catch {
-    return String(ts || "");
-  }
-}
-function playerName(teamMap, id) {
-  return teamMap[id] || (id ? "Unknown" : "BYE/TBD");
-}
+function timeStr(ts) { try { return new Date(ts).toLocaleString(); } catch { return String(ts || ""); } }
+function playerName(teamMap, id) { return teamMap[id] || (id ? "Unknown" : "BYE/TBD"); }
 function statusText(m) {
-  if (m.status && String(m.status).trim()) return m.status; // Scheduled / BYE / Final etc.
+  if (m.status && String(m.status).trim()) return m.status;
   const bothEmpty = !m.aId && !m.bId;
   const singleBye = (!!m.aId && !m.bId) || (!m.aId && !!m.bId);
   if (bothEmpty) return "Empty";
   if (singleBye) return "BYE";
   return "TBD";
 }
-function winnerText(teamMap, m) {
-  return m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD";
-}
+function winnerText(teamMap, m) { return m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD"; }
 function groupMatchesByRound(tn) {
   const byRound = new Map();
-  for (const m of tn.matches) {
-    if (!byRound.has(m.round)) byRound.set(m.round, []);
-    byRound.get(m.round).push(m);
-  }
-  return Array.from(byRound.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(([round, matches]) => ({ round, matches }));
+  for (const m of tn.matches) { if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
+  return Array.from(byRound.entries()).sort((a, b) => a[0] - b[0]).map(([round, matches]) => ({ round, matches }));
 }
-
-/** Short round code by match-count in that round (used across site & exports) */
 function stageShort(count) {
   if (!Number.isFinite(count) || count <= 0) return "R?";
   if (count === 1) return "F";
@@ -137,246 +110,120 @@ function exportTournamentToExcel(tn) {
     const wb = XLSX.utils.book_new();
     const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
     const grouped = groupMatchesByRound(tn);
-    if (grouped.length === 0) {
-      alert("No matches to export.");
-      return;
-    }
-    for (const { round, matches } of grouped) {
+    if (grouped.length === 0) return alert("No matches to export.");
+    for (const { matches } of grouped) {
       const data = [["Match #", "Player A", "Player B", "Winner", "Status"]];
       matches.forEach((m, i) => {
-        const a = playerName(teamMap, m.aId);
-        const b = playerName(teamMap, m.bId);
-        const w = winnerText(teamMap, m);
-        const s = statusText(m);
-        data.push([i + 1, a, b, w, s]);
+        data.push([i + 1, playerName(teamMap, m.aId), playerName(teamMap, m.bId), winnerText(teamMap, m), statusText(m)]);
       });
       const ws = XLSX.utils.aoa_to_sheet(data);
       ws["!cols"] = [{ wch: 8 }, { wch: 24 }, { wch: 24 }, { wch: 20 }, { wch: 14 }];
       XLSX.utils.book_append_sheet(wb, ws, stageShort(matches.length));
     }
-    const fname = `${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.xlsx`;
-    XLSX.writeFile(wb, fname);
-  } catch (e) {
-    console.error("Excel export failed:", e);
-    alert("Excel export failed. Check console.");
-  }
+    XLSX.writeFile(wb, `${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.xlsx`);
+  } catch (e) { console.error("Excel export failed:", e); alert("Excel export failed. Check console."); }
 }
 
-/* ---------------- Vector PDF bracket (white paper) ---------------- */
+/* ---------------- Vector PDF bracket ---------------- */
 function buildProjectedRounds(tn) {
   const byRound = new Map();
-  for (const m of (tn.matches || [])) {
-    if (!byRound.has(m.round)) byRound.set(m.round, []);
-    byRound.get(m.round).push(m);
-  }
+  for (const m of (tn.matches || [])) { if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
   for (const [r, arr] of byRound) byRound.set(r, arr.slice());
 
   const teamCount = (tn.teams || []).length;
-  if (teamCount < 2) {
-    const only = (byRound.get(1) || []).slice();
-    return only.length ? [{ round: 1, matches: only }] : [];
-  }
+  if (teamCount < 2) { const only = (byRound.get(1) || []).slice(); return only.length ? [{ round: 1, matches: only }] : []; }
   const slots = nextPow2(teamCount);
   const totalRounds = Math.log2(slots);
   const out = [];
-
   for (let r = 1; r <= totalRounds; r++) {
-    const expected = slots / Math.pow(2, r); // matches in round r
+    const expected = slots / Math.pow(2, r);
     const existing = (byRound.get(r) || []).slice(0, expected);
-    const padded = Array.from({ length: expected }, (_, i) => {
-      const ex = existing[i];
-      if (ex) return ex;
-      return {
-        id: `__placeholder_${r}_${i}__`,
-        round: r,
-        aId: null,
-        bId: null,
-        status: r === 1 ? "Scheduled" : "Pending",
-        winnerId: null,
-      };
-    });
+    const padded = Array.from({ length: expected }, (_, i) => existing[i] || ({
+      id: `__placeholder_${r}_${i}__`, round: r, aId: null, bId: null, status: r === 1 ? "Scheduled" : "Pending", winnerId: null,
+    }));
     out.push({ round: r, matches: padded });
   }
   return out;
 }
-function feederLabel(roundMatchesCount, matchIdxZeroBased) {
-  const label = stageShort(roundMatchesCount);
-  return `${label}${matchIdxZeroBased + 1}`;
-}
-function placeholderName(prevRoundMatchesCount, childMatchIndex) {
-  return `Winner of ${feederLabel(prevRoundMatchesCount, childMatchIndex)}`;
-}
+function feederLabel(roundMatchesCount, i0) { return `${stageShort(roundMatchesCount)}${i0 + 1}`; }
+function placeholderName(prevCount, childIndex) { return `Winner of ${feederLabel(prevCount, childIndex)}`; }
 
 async function exportTournamentToPDF(tn) {
   const jsPDFCtor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF || (window.jspdf && window.jspdf.default);
-  if (!jsPDFCtor) { alert("jsPDF not found. Include jspdf.umd.min.js"); return; }
-
-  const rounds = buildProjectedRounds(tn);
-  if (!rounds.length) { alert("No matches to export."); return; }
-
+  if (!jsPDFCtor) return alert("jsPDF not found. Include jspdf.umd.min.js");
+  const rounds = buildProjectedRounds(tn); if (!rounds.length) return alert("No matches to export.");
   const pdf = new jsPDFCtor({ orientation: "landscape", unit: "pt", format: "a4" });
-  const pageW = pdf.internal.pageSize.getWidth();
-  const pageH = pdf.internal.pageSize.getHeight();
-  const margin = 36;
-
-  // Colors / styles (white background, black text/lines)
-  const BG = "#ffffff";
-  const FG = "#000000";
-  const LINE = "#000000";
-
-  // Title
+  const pageW = pdf.internal.pageSize.getWidth(), pageH = pdf.internal.pageSize.getHeight(), margin = 36;
+  const BG = "#ffffff", FG = "#000000", LINE = "#000000";
   const title = `${tn.name} — Fixtures`;
-  pdf.setFillColor(BG);
-  pdf.rect(0, 0, pageW, pageH, "F");
-  pdf.setTextColor(FG);
-  pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(18);
-  pdf.text(title, margin, margin + 6);
+  pdf.setFillColor(BG); pdf.rect(0, 0, pageW, pageH, "F"); pdf.setTextColor(FG); pdf.setFont("helvetica", "bold"); pdf.setFontSize(18); pdf.text(title, margin, margin + 6);
 
-  // Layout “virtual space” then scale-to-fit
-  const colGap = 44;
-  const boxW  = 210;
-  const boxH0 = 34;
-  const vGap0 = 16;
-  const strokeW = 1.2;
-
+  const colGap = 44, boxW = 210, boxH0 = 34, vGap0 = 16, strokeW = 1.2;
   const colWidths = rounds.map((_, rIdx) => boxW * Math.max(0.75, 1 - rIdx * 0.08));
   const roundHeights = rounds.map((_, rIdx) => boxH0 + rIdx * 4);
-  const roundVGaps   = rounds.map((_, rIdx) => vGap0 * Math.pow(2, rIdx));
+  const roundVGaps = rounds.map((_, rIdx) => vGap0 * Math.pow(2, rIdx));
 
-  // Column x
-  const colX = [];
-  let totalW = 0;
+  const colX = []; let totalW = 0;
   for (let r = 0; r < rounds.length; r++) {
-    if (r === 0) {
-      colX[r] = 0;
-      totalW += colWidths[r];
-    } else {
-      colX[r] = colX[r - 1] + colWidths[r - 1] + colGap;
-      totalW += colGap + colWidths[r];
-    }
+    colX[r] = r === 0 ? 0 : colX[r - 1] + colWidths[r - 1] + colGap;
+    totalW += (r === 0 ? colWidths[r] : colGap + colWidths[r]);
   }
 
   const r1Count = rounds[0].matches.length;
   const bodyH = r1Count * roundHeights[0] + (r1Count - 1) * roundVGaps[0];
-  const maxW = pageW - margin * 2;
-  const maxH = pageH - (margin * 2 + 18 + 10);
+  const maxW = pageW - margin * 2, maxH = pageH - (margin * 2 + 18 + 10);
   const scale = Math.min(1, maxW / totalW, maxH / bodyH);
-
-  const originX = margin;
-  const originY = margin + 24;
-  const S = (n) => n * scale;
-
+  const originX = margin, originY = margin + 24, S = (n) => n * scale;
   const teamMap = Object.fromEntries((tn.teams || []).map(t => [t.id, t.name]));
 
-  // Cache positions: pos[r][i] = {x,y,w,h}
   const pos = rounds.map((r, rIdx) => {
-    const matches = r.matches;
-    const thisBoxH = roundHeights[rIdx];
-    const thisVGap = roundVGaps[rIdx];
-
-    const arr = [];
-    if (rIdx === 0) {
-      let y = 0;
-      for (let i = 0; i < matches.length; i++) {
-        arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH });
-        y += thisBoxH + thisVGap;
-      }
-    } else {
-      const prevBoxH = roundHeights[rIdx - 1];
-      const prevVGap = roundVGaps[rIdx - 1];
-      const childBlockH = prevBoxH + prevVGap;
-      const myBlockH = childBlockH * 2 - prevVGap;
-      let y = (myBlockH - thisBoxH) / 2;
-      for (let i = 0; i < matches.length; i++) {
-        arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH });
-        y += myBlockH;
-      }
+    const matches = r.matches, thisBoxH = roundHeights[rIdx], thisVGap = roundVGaps[rIdx]; const arr = [];
+    if (rIdx === 0) { let y = 0; for (let i = 0; i < matches.length; i++) { arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH }); y += thisBoxH + thisVGap; } }
+    else {
+      const prevBoxH = roundHeights[rIdx - 1], prevVGap = roundVGaps[rIdx - 1];
+      const childBlockH = prevBoxH + prevVGap, myBlockH = childBlockH * 2 - prevVGap; let y = (myBlockH - thisBoxH) / 2;
+      for (let i = 0; i < matches.length; i++) { arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH }); y += myBlockH; }
     }
     return arr;
   });
 
   const boxText = (rIdx, iIdx, side, m) => {
-    if (rIdx === 0) {
-      return playerName(teamMap, side === "a" ? m.aId : m.bId);
-    }
-    const prevCount = rounds[rIdx - 1].matches.length;
-    const childIndex = iIdx * 2 + (side === "a" ? 0 : 1);
+    if (rIdx === 0) return playerName(teamMap, side === "a" ? m.aId : m.bId);
+    const prevCount = rounds[rIdx - 1].matches.length; const childIndex = iIdx * 2 + (side === "a" ? 0 : 1);
     return placeholderName(prevCount, childIndex);
   };
   const winTxt = (m) => (m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD");
 
-  // Draw boxes + text
-  pdf.setLineWidth(strokeW);
-  pdf.setDrawColor(LINE);
-  pdf.setFont("helvetica", "normal");
-
+  pdf.setLineWidth(strokeW); pdf.setDrawColor(LINE); pdf.setFont("helvetica", "normal");
   for (let r = 0; r < rounds.length; r++) {
-    const matches = rounds[r].matches;
-    const code = stageShort(matches.length);
-    const thisBoxH = roundHeights[r];
-
+    const matches = rounds[r].matches, code = stageShort(matches.length), thisBoxH = roundHeights[r];
     for (let i = 0; i < matches.length; i++) {
-      const m = matches[i];
-      const p = pos[r][i];
-
-      // box
+      const m = matches[i], p = pos[r][i], pad = 6 * scale;
       pdf.rect(originX + S(p.x), originY + S(p.y), S(p.w), S(p.h), "S");
-
-      // text
-      const pad = 6 * scale;
-
-      pdf.setFont("helvetica", "bold");
-      pdf.setFontSize(10 * scale);
+      pdf.setFont("helvetica", "bold"); pdf.setFontSize(10 * scale);
       pdf.text(code, originX + S(p.x) + pad, originY + S(p.y) + pad + 8 * scale);
-
-      pdf.setFont("helvetica", "normal");
-      pdf.setFontSize(10 * scale);
-      const aY = originY + S(p.y) + pad + 18 * scale;
-      const bY = originY + S(p.y) + pad + 34 * scale;
-
-      const aTxt = boxText(r, i, "a", m);
-      const bTxt = boxText(r, i, "b", m);
-      pdf.text(aTxt, originX + S(p.x) + pad, aY);
-      pdf.text(bTxt, originX + S(p.x) + pad, bY);
-
+      pdf.setFont("helvetica", "normal"); pdf.setFontSize(10 * scale);
+      const aY = originY + S(p.y) + pad + 18 * scale, bY = originY + S(p.y) + pad + 34 * scale;
+      pdf.text(boxText(r, i, "a", m), originX + S(p.x) + pad, aY);
+      pdf.text(boxText(r, i, "b", m), originX + S(p.x) + pad, bY);
       pdf.setFontSize(9 * scale);
       pdf.text(`Winner: ${winTxt(m)}`, originX + S(p.x) + pad, originY + S(p.y + thisBoxH) - pad);
     }
   }
-
-  // Connectors
   for (let r = 0; r < rounds.length - 1; r++) {
-    const child = pos[r];
-    const parent = pos[r + 1];
-
+    const child = pos[r], parent = pos[r + 1];
     for (let i = 0; i < parent.length; i++) {
-      const p = parent[i];
-      const c1 = child[i * 2];
-      const c2 = child[i * 2 + 1];
-      if (!c1 || !c2) continue;
-
-      const c1x = originX + S(c1.x + c1.w);
-      const c2x = originX + S(c2.x + c2.w);
-      const c1y = originY + S(c1.y + c1.h / 2);
-      const c2y = originY + S(c2.y + c2.h / 2);
-
-      const px = originX + S(p.x);
-      const py = originY + S(p.y + p.h / 2);
-
-      const midX = px - 10 * scale;
-
-      pdf.line(c1x, c1y, midX, c1y);
-      pdf.line(c2x, c2y, midX, c2y);
-      pdf.line(midX, c1y, midX, c2y);
-      pdf.line(midX, py, px, py);
+      const p = parent[i], c1 = child[i * 2], c2 = child[i * 2 + 1]; if (!c1 || !c2) continue;
+      const c1x = originX + S(c1.x + c1.w), c2x = originX + S(c2.x + c2.w);
+      const c1y = originY + S(c1.y + c1.h / 2), c2y = originY + S(c2.y + c2.h / 2);
+      const px = originX + S(p.x), py = originY + S(p.y + p.h / 2), midX = px - 10 * scale;
+      pdf.line(c1x, c1y, midX, c1y); pdf.line(c2x, c2y, midX, c2y); pdf.line(midX, c1y, midX, c2y); pdf.line(midX, py, px, py);
     }
   }
-
   pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
 }
 
-/* ---------------- Dark themed custom select ---------------- */
+/* ---------------- Dark themed custom select (mobile + desktop) ---------------- */
 function DarkSelect({
   value,
   onChange,
@@ -387,20 +234,20 @@ function DarkSelect({
   style = {},
   itemClassName = "",
 }) {
-  const [open, setOpen] = React.useState(false);
-  const btnRef = React.useRef(null);
-  const listRef = React.useRef(null);
-  const [focusIdx, setFocusIdx] = React.useState(-1);
+  const [open, setOpen] = useState(false);
+  const [dropUp, setDropUp] = useState(false);
+  const btnRef = useRef(null);
+  const listRef = useRef(null);
+  const [focusIdx, setFocusIdx] = useState(-1);
 
   const current = options.find(o => o.value === value) || null;
 
-  React.useEffect(() => {
+  useEffect(() => {
     function onDocClick(e) {
       if (!btnRef.current) return;
       if (btnRef.current.contains(e.target)) return;
       if (listRef.current && listRef.current.contains(e.target)) return;
-      setOpen(false);
-      setFocusIdx(-1);
+      setOpen(false); setFocusIdx(-1);
     }
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
@@ -411,47 +258,39 @@ function DarkSelect({
     setOpen(true);
     const idx = Math.max(0, options.findIndex(o => o.value === value));
     setFocusIdx(idx);
+    // decide dropUp vs dropDown
+    setTimeout(() => {
+      const btn = btnRef.current;
+      if (!btn) return;
+      const rect = btn.getBoundingClientRect();
+      const vh = window.innerHeight || document.documentElement.clientHeight;
+      const spaceBelow = vh - rect.bottom;
+      const approxListH = Math.min(320, options.length * 40 + 8); // ~item height 40px
+      setDropUp(spaceBelow < approxListH && rect.top > approxListH);
+    }, 0);
   }
 
   function choose(idx) {
     const opt = options[idx];
     if (!opt) return;
     onChange?.(opt.value);
-    setOpen(false);
-    setFocusIdx(-1);
+    setOpen(false); setFocusIdx(-1);
   }
 
   function onKeyDown(e) {
     if (!open) {
-      if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        openMenu();
-      }
+      if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") { e.preventDefault(); openMenu(); }
       return;
     }
-    if (e.key === "Escape") {
-      e.preventDefault();
-      setOpen(false);
-      setFocusIdx(-1);
-      return;
-    }
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setFocusIdx(i => Math.min(options.length - 1, (i < 0 ? 0 : i + 1)));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setFocusIdx(i => Math.max(0, (i < 0 ? 0 : i - 1)));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      if (focusIdx >= 0) choose(focusIdx);
-    } else if (e.key === "Tab") {
-      setOpen(false);
-      setFocusIdx(-1);
-    }
+    if (e.key === "Escape") { e.preventDefault(); setOpen(false); setFocusIdx(-1); return; }
+    if (e.key === "ArrowDown") { e.preventDefault(); setFocusIdx(i => Math.min(options.length - 1, (i < 0 ? 0 : i + 1))); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setFocusIdx(i => Math.max(0, (i < 0 ? 0 : i - 1))); }
+    else if (e.key === "Enter") { e.preventDefault(); if (focusIdx >= 0) choose(focusIdx); }
+    else if (e.key === "Tab") { setOpen(false); setFocusIdx(-1); }
   }
 
   return (
-    <div className={`relative ${className}`} style={{ minWidth: 160, ...style }}>
+    <div className={`relative w-full ${className}`} style={{ ...style }}>
       <button
         ref={btnRef}
         type="button"
@@ -467,7 +306,7 @@ function DarkSelect({
         <span className={`truncate ${current ? "" : "text-white/60"}`}>
           {current ? (current.label ?? String(current.value)) : placeholder}
         </span>
-        <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0" fill="currentColor" aria-hidden="true">
+        <svg viewBox="0 0 24 24" className={`w-4 h-4 shrink-0 transition-transform ${open && !dropUp ? "rotate-180" : ""}`} fill="currentColor" aria-hidden="true">
           <path d="M7 10l5 5 5-5z" />
         </svg>
       </button>
@@ -477,8 +316,16 @@ function DarkSelect({
           ref={listRef}
           role="listbox"
           tabIndex={-1}
-          className="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-xl border glass shadow-xl"
-          style={{ borderColor: TM_BLUE, background: "rgba(20,22,35,0.98)", backdropFilter: "blur(8px)" }}
+          className={`absolute z-50 max-h-80 w-full overflow-auto rounded-xl border glass shadow-xl`}
+          style={{
+            borderColor: TM_BLUE,
+            background: "rgba(20,22,35,0.98)",
+            backdropFilter: "blur(8px)",
+            marginTop: dropUp ? 0 : 4,
+            marginBottom: dropUp ? 4 : 0,
+            bottom: dropUp ? "calc(100%)" : "auto",
+            top: dropUp ? "auto" : "calc(100%)",
+          }}
           onKeyDown={onKeyDown}
         >
           {options.length === 0 ? (
@@ -534,7 +381,7 @@ function Collapsible({ title, subtitle, right, children, defaultOpen = false }) 
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="border border-zinc-700 rounded-2xl mb-3 overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 glass-header" style={{ borderColor: TM_BLUE }}>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-3 py-2 glass-header" style={{ borderColor: TM_BLUE }}>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setOpen((o) => !o)}
@@ -547,7 +394,7 @@ function Collapsible({ title, subtitle, right, children, defaultOpen = false }) 
             {subtitle && <div className="text-xs text-zinc-400">{subtitle}</div>}
           </div>
         </div>
-        {right}
+        <div className="flex flex-wrap gap-2">{right}</div>
       </div>
       {open && <div className="p-3">{children}</div>}
     </div>
@@ -559,14 +406,14 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
   const bothEmpty = !m.aId && !m.bId;
   const singleBye = (!!m.aId && !m.bId) || (!m.aId && !!m.bId);
   return (
-    <div className="flex flex-wrap items-center gap-2 py-2 text-sm">
-      <span className="w-24 text-zinc-400">
-        {stageText}
-        {stageText === "F" ? "" : <> • M{idx}</>}
+    <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-1 sm:gap-2 py-2 text-sm">
+      <span className="text-zinc-400 sm:w-24">
+        {stageText}{stageText === "F" ? "" : <> • M{idx}</>}
       </span>
-      <span className="flex-1">{aName}</span>
-      {!bothEmpty && !singleBye && <span>vs</span>}
-      <span className="flex-1">{bName}</span>
+      <div className="flex-1">{aName}</div>
+      {!bothEmpty && !singleBye && <span className="hidden sm:inline">vs</span>}
+      <div className="flex-1">{bName}</div>
+
       {!canEdit ? (
         <span className="text-xs">
           {bothEmpty ? (
@@ -574,9 +421,7 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
           ) : singleBye ? (
             <span className="text-white/70">Auto-advance available</span>
           ) : m.winnerId ? (
-            <>
-              Winner: <b>{teamMap[m.winnerId] || "TBD"}</b>
-            </>
+            <>Winner: <b>{teamMap[m.winnerId] || "TBD"}</b></>
           ) : (
             <span className="text-white/60">Winner: TBD</span>
           )}
@@ -588,24 +433,22 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
           className={`px-2 py-1 rounded border ${
             m.winnerId ? "border-emerald-400 text-emerald-300" : "border-white hover:bg-white hover:text-black"
           }`}
-          onClick={() => {
-            const winnerId = m.aId || m.bId || null;
-            if (winnerId) onPickWinner(m.id, winnerId);
-          }}
+          onClick={() => { const winnerId = m.aId || m.bId || null; if (winnerId) onPickWinner(m.id, winnerId); }}
         >
           {m.winnerId ? "Advanced" : "Auto-advance"}
         </button>
       ) : (
-        <DarkSelect
-          className="min-w-[200px]"
-          value={m.winnerId || ""}
-          onChange={(val) => onPickWinner(m.id, val || null)}
-          options={[
-            { value: "", label: "Winner — pick" },
-            ...(m.aId ? [{ value: m.aId, label: aName }] : []),
-            ...(m.bId ? [{ value: m.bId, label: bName }] : []),
-          ]}
-        />
+        <div className="w-full sm:w-auto sm:min-w-[200px]">
+          <DarkSelect
+            value={m.winnerId || ""}
+            onChange={(val) => onPickWinner(m.id, val || null)}
+            options={[
+              { value: "", label: "Winner — pick" },
+              ...(m.aId ? [{ value: m.aId, label: aName }] : []),
+              ...(m.bId ? [{ value: m.bId, label: bName }] : []),
+            ]}
+          />
+        </div>
       )}
     </div>
   );
@@ -627,8 +470,8 @@ export default function TournamentMaker() {
   const [namesText, setNamesText] = useState("");
   const [seed1, setSeed1] = useState("");
   const [seed2, setSeed2] = useState("");
-  const [seed3, setSeed3] = useState(""); // NEW
-  const [seed4, setSeed4] = useState(""); // NEW
+  const [seed3, setSeed3] = useState("");
+  const [seed4, setSeed4] = useState("");
   const [builderTeams, setBuilderTeams] = useState([]);
 
   const uploadRef = useRef(null);
@@ -648,13 +491,10 @@ export default function TournamentMaker() {
         const data = await loadStoreOnce();
         setTournaments(Array.isArray(data.tournaments) ? data.tournaments : []);
         setDeletedTournaments(Array.isArray(data.deleted) ? data.deleted : []);
-      } catch (e) {
-        console.warn("Load error:", e);
-      }
+      } catch (e) { console.warn("Load error:", e); }
     })();
   }, []);
 
-  // builder map
   const builderTeamMap = useMemo(
     () => Object.fromEntries(builderTeams.map((tm) => [tm.name, tm.id])),
     [builderTeams]
@@ -664,25 +504,15 @@ export default function TournamentMaker() {
     if (!isAdmin) return alert("Admin only.");
     const lines = namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     const uniq = Array.from(new Set(lines));
-
-    // duplicate warning (from pasted list)
     const dups = findDuplicateNamesCaseInsensitive(lines);
     if (dups.length > 0) {
-      alert(
-        "Duplicate names found in the list:\n\n" +
-        dups.map((n) => `• ${n}`).join("\n") +
-        "\n\nPlease fix and try again."
-      );
+      alert("Duplicate names found:\n\n" + dups.map((n) => `• ${n}`).join("\n") + "\n\nPlease fix and try again.");
       return;
     }
-
     const teams = uniq.map((n) => ({ id: uid(), name: n }));
     setBuilderTeams(teams);
     if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
-      setSeed1(uniq[0] || "");
-      setSeed2(uniq[1] || "");
-      setSeed3(uniq[2] || "");
-      setSeed4(uniq[3] || "");
+      setSeed1(uniq[0] || ""); setSeed2(uniq[1] || ""); setSeed3(uniq[2] || ""); setSeed4(uniq[3] || "");
     }
   }
 
@@ -691,115 +521,44 @@ export default function TournamentMaker() {
     if (!file) return;
     const ext = (file.name.split(".").pop() || "").toLowerCase();
     let names = [];
-    if (ext === "csv") {
-      const text = await file.text();
-      names = parseCSVPlayers(text);
-    } else if (ext === "xlsx" || ext === "xls") {
-      const buf = await file.arrayBuffer();
-      names = await parseExcelPlayers(buf);
-    } else {
-      alert("Unsupported file type. Please upload .csv, .xlsx, or .xls");
-      return;
-    }
+    if (ext === "csv") { const text = await file.text(); names = parseCSVPlayers(text); }
+    else if (ext === "xlsx" || ext === "xls") { const buf = await file.arrayBuffer(); names = await parseExcelPlayers(buf); }
+    else return alert("Unsupported file type. Please upload .csv, .xlsx, or .xls");
     if (names.length === 0) return alert("Could not find a 'Players' column in the file.");
 
-    // duplicate warning (from file)
     const dups = findDuplicateNamesCaseInsensitive(names);
     if (dups.length > 0) {
-      alert(
-        "Duplicate names found in uploaded file:\n\n" +
-        dups.map((n) => `• ${n}`).join("\n") +
-        "\n\nPlease fix and re-upload."
-      );
+      alert("Duplicate names found in uploaded file:\n\n" + dups.map((n) => `• ${n}`).join("\n") + "\n\nPlease fix and re-upload.");
       return;
     }
-
     const teams = names.map((n) => ({ id: uid(), name: n }));
     setBuilderTeams(teams);
     if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
-      setSeed1(names[0] || "");
-      setSeed2(names[1] || "");
-      setSeed3(names[2] || "");
-      setSeed4(names[3] || "");
+      setSeed1(names[0] || ""); setSeed2(names[1] || ""); setSeed3(names[2] || ""); setSeed4(names[3] || "");
     }
   }
 
-  /* --------- Round helpers --------- */
-  function roundCounts(tn) {
-    const mp = new Map();
-    for (const m of tn.matches) {
-      if (!(m.aId || m.bId)) continue;
-      mp.set(m.round, (mp.get(m.round) || 0) + 1);
-    }
-    return mp;
-  }
-  function maxRound(tn) {
-    return tn.matches.length ? Math.max(...tn.matches.map((m) => m.round)) : 0;
-  }
-  function currentRoundMatches(tn) {
-    const mr = maxRound(tn);
-    return tn.matches.filter((m) => m.round === mr);
-  }
-  function canGenerateNext(tn) {
-    const cur = currentRoundMatches(tn);
-    if (!cur.length) return false;
-    const valid = cur.filter((m) => m.aId || m.bId);
-    return valid.length > 0 && valid.every((m) => !!m.winnerId);
-  }
+  function roundCounts(tn) { const mp = new Map(); for (const m of tn.matches) { if (!(m.aId || m.bId)) continue; mp.set(m.round, (mp.get(m.round) || 0) + 1); } return mp; }
+  function maxRound(tn) { return tn.matches.length ? Math.max(...tn.matches.map((m) => m.round)) : 0; }
+  function currentRoundMatches(tn) { const mr = maxRound(tn); return tn.matches.filter((m) => m.round === mr); }
+  function canGenerateNext(tn) { const cur = currentRoundMatches(tn); if (!cur.length) return false; const valid = cur.filter((m) => m.aId || m.bId); return valid.length > 0 && valid.every((m) => !!m.winnerId); }
 
-  /* --------- 2-or-4 seeding: generate R1 --------- */
   function generateRound1Matches(teams, seeds) {
-    // seeds = { s1, s2, s3, s4 } — s3/s4 optional
     const names = teams.map((x) => x.name);
-    let size = 1;
-    while (size < names.length) size *= 2;
-
+    let size = 1; while (size < names.length) size *= 2;
     const slots = Array(size).fill(null);
-
-    // Reserve positions for seeds to enforce meeting constraints:
-    // s1 → 0 ; s2 → size-1  (final only)
-    // s3 → size/2 ; s4 → size/2 - 1  (opposite halves; any top-4 only meet from SF onward)
-    const hasS3 = !!seeds.s3;
-    const hasS4 = !!seeds.s4;
-    slots[0] = seeds.s1;
-    slots[size - 1] = seeds.s2;
-    if (hasS3 && hasS4 && size >= 4) {
-      slots[size / 2] = seeds.s3;
-      slots[size / 2 - 1] = seeds.s4;
-    }
-
-    const reserved = new Set(
-      [seeds.s1, seeds.s2, hasS3 ? seeds.s3 : null, hasS4 ? seeds.s4 : null]
-        .filter(Boolean)
-        .map((n) => n.toLowerCase())
-    );
+    const hasS3 = !!seeds.s3, hasS4 = !!seeds.s4;
+    slots[0] = seeds.s1; slots[size - 1] = seeds.s2;
+    if (hasS3 && hasS4 && size >= 4) { slots[size / 2] = seeds.s3; slots[size / 2 - 1] = seeds.s4; }
+    const reserved = new Set([seeds.s1, seeds.s2, hasS3 ? seeds.s3 : null, hasS4 ? seeds.s4 : null].filter(Boolean).map((n) => n.toLowerCase()));
     const others = names.filter((n) => !reserved.has(n.toLowerCase()));
+    const shuffled = (() => { const a = others.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; })();
 
-    // Shuffle others
-    const shuffled = (() => {
-      const a = others.slice();
-      for (let i = a.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [a[i], a[j]] = [a[j], a[i]];
-      }
-      return a;
-    })();
+    const order = []; const half = size / 2, quarter = size / 4;
+    function pushRange(s, e) { for (let i = s; i < e; i++) if (slots[i] === null) order.push(i); }
+    pushRange(0, quarter); pushRange(half, half + quarter); pushRange(quarter, half); pushRange(half + quarter, size);
 
-    // Fill order across quarters: Q1, Q3, Q2, Q4
-    const order = [];
-    const half = size / 2;
-    const quarter = size / 4;
-    function pushRange(start, end) { for (let i = start; i < end; i++) if (slots[i] === null) order.push(i); }
-    pushRange(0, quarter);
-    pushRange(half, half + quarter);
-    pushRange(quarter, half);
-    pushRange(half + quarter, size);
-
-    let oi = 0;
-    for (const pos of order) {
-      if (oi >= shuffled.length) break;
-      slots[pos] = shuffled[oi++];
-    }
+    let oi = 0; for (const pos of order) { if (oi >= shuffled.length) break; slots[pos] = shuffled[oi++]; }
 
     const nameToId = Object.fromEntries(teams.map((tm) => [tm.name, tm.id]));
     const matches = [];
@@ -808,109 +567,60 @@ export default function TournamentMaker() {
       const bId = slots[i + 1] ? nameToId[slots[i + 1]] : null;
       if (!aId && !bId) continue;
       const bye = !aId || !bId;
-      let winnerId = null;
-      if (bye) winnerId = aId || bId || null;
-      matches.push({
-        id: uid(),
-        round: 1,
-        aId,
-        bId,
-        status: bye ? "BYE" : "Scheduled",
-        winnerId,
-      });
+      matches.push({ id: uid(), round: 1, aId, bId, status: bye ? "BYE" : "Scheduled", winnerId: bye ? (aId || bId || null) : null });
     }
     return matches;
   }
 
-  /* --------- CRUD on matches --------- */
   function pickWinner(tournamentId, matchId, winnerId) {
     if (!isAdmin) return alert("Admin only.");
-    setTournaments((prev) =>
-      prev.map((tn) => {
-        if (tn.id !== tournamentId) return tn;
-        const matches = tn.matches.map((m) =>
-          m.id === matchId ? { ...m, winnerId, status: winnerId ? "Final" : m.status } : m
-        );
-        return { ...tn, matches };
-      })
-    );
+    setTournaments((prev) => prev.map((tn) => {
+      if (tn.id !== tournamentId) return tn;
+      const matches = tn.matches.map((m) => (m.id === matchId ? { ...m, winnerId, status: winnerId ? "Final" : m.status } : m));
+      return { ...tn, matches };
+    }));
   }
   function generateNextRound(tournamentId) {
     if (!isAdmin) return alert("Admin only.");
-    setTournaments((prev) =>
-      prev.map((tn) => {
-        if (tn.id !== tournamentId) return tn;
-        if (!canGenerateNext(tn)) return tn;
-        const cur = currentRoundMatches(tn).filter((m) => m.aId || m.bId);
-        const winners = cur.map((m) => m.winnerId).filter(Boolean);
-        if (winners.length <= 1) {
-          return { ...tn, status: "completed", championId: winners[0] || null };
-        }
-        const nextRoundNo = maxRound(tn) + 1;
-        const next = [];
-        for (let i = 0; i < winners.length; i += 2) {
-          const aId = winners[i] || null;
-          const bId = winners[i + 1] || null;
-          if (!aId && !bId) continue;
-          const bye = !aId || !bId;
-          let winnerId = null;
-          if (bye) winnerId = aId || bId || null;
-          next.push({
-            id: uid(),
-            round: nextRoundNo,
-            aId,
-            bId,
-            status: bye ? "BYE" : "Scheduled",
-            winnerId,
-          });
-        }
-        return { ...tn, matches: [...tn.matches, ...next] };
-      })
-    );
+    setTournaments((prev) => prev.map((tn) => {
+      if (tn.id !== tournamentId) return tn;
+      if (!canGenerateNext(tn)) return tn;
+      const cur = currentRoundMatches(tn).filter((m) => m.aId || m.bId);
+      const winners = cur.map((m) => m.winnerId).filter(Boolean);
+      if (winners.length <= 1) return { ...tn, status: "completed", championId: winners[0] || null };
+      const nextRoundNo = maxRound(tn) + 1, next = [];
+      for (let i = 0; i < winners.length; i += 2) {
+        const aId = winners[i] || null, bId = winners[i + 1] || null;
+        if (!aId && !bId) continue;
+        const bye = !aId || !bId;
+        next.push({ id: uid(), round: nextRoundNo, aId, bId, status: bye ? "BYE" : "Scheduled", winnerId: bye ? (aId || bId || null) : null });
+      }
+      return { ...tn, matches: [...tn.matches, ...next] };
+    }));
   }
 
-  /* --------- Delete / Restore --------- */
-  function openDeleteModal(tournamentId) {
-    if (!isAdmin) return alert("Admin only.");
-    setDeleteTargetId(tournamentId);
-    setDeletePw("");
-    setShowDeleteModal(true);
-  }
+  function openDeleteModal(tournamentId) { if (!isAdmin) return alert("Admin only."); setDeleteTargetId(tournamentId); setDeletePw(""); setShowDeleteModal(true); }
   function confirmDelete() {
     if (!isAdmin) return;
     if (deletePw !== ADMIN_PASSWORD) return alert("Incorrect password.");
-    const ok = window.confirm?.(
-      "Are you sure you want to delete this tournament?\nIt will be moved to the DELETED tab (not permanently erased)."
-    );
+    const ok = window.confirm?.("Are you sure you want to delete this tournament?\nIt will be moved to the DELETED tab (not permanently erased).");
     if (!ok) return;
-
     setTournaments((prev) => {
-      const idx = prev.findIndex((t) => t.id === deleteTargetId);
-      if (idx === -1) return prev;
-      const t = prev[idx];
-      const remaining = [...prev.slice(0, idx), ...prev.slice(idx + 1)];
+      const idx = prev.findIndex((t) => t.id === deleteTargetId); if (idx === -1) return prev;
+      const t = prev[idx]; const remaining = [...prev.slice(0, idx), ...prev.slice(idx + 1)];
       const archived = { ...t, deletedAt: Date.now() };
       setDeletedTournaments((old) => [archived, ...old]);
       return remaining;
     });
-
-    setShowDeleteModal(false);
-    setDeleteTargetId(null);
-    setDeletePw("");
+    setShowDeleteModal(false); setDeleteTargetId(null); setDeletePw("");
   }
-  function cancelDelete() {
-    setShowDeleteModal(false);
-    setDeleteTargetId(null);
-    setDeletePw("");
-  }
+  function cancelDelete() { setShowDeleteModal(false); setDeleteTargetId(null); setDeletePw(""); }
   function restoreTournament(tournamentId) {
     if (!isAdmin) return alert("Admin only.");
     setDeletedTournaments((prevDeleted) => {
       const idx = prevDeleted.findIndex((t) => t.id === tournamentId);
       if (idx === -1) return prevDeleted;
-      const t = prevDeleted[idx];
-      const restDeleted = [...prevDeleted.slice(0, idx), ...prevDeleted.slice(idx + 1)];
-      const { deletedAt, ...restored } = t;
+      const t = prevDeleted[idx]; const restDeleted = [...prevDeleted.slice(0, idx), ...prevDeleted.slice(idx + 1)]; const { deletedAt, ...restored } = t;
       setTournaments((prev) => [restored, ...prev]);
       return restDeleted;
     });
@@ -923,182 +633,83 @@ export default function TournamentMaker() {
     setDeletedTournaments((prev) => prev.filter((t) => t.id !== tournamentId));
   }
 
-  /* --------- Apply entries to existing (keep as before) --------- */
   function applyEntriesToTournament(tournamentId, newNames) {
     if (!isAdmin) return alert("Admin only.");
-
-    // block duplicates in the input list
     const dups = findDuplicateNamesCaseInsensitive(newNames);
     if (dups.length > 0) {
-      alert(
-        "Duplicate names found:\n\n" +
-        dups.map((n) => `• ${n}`).join("\n") +
-        "\n\nPlease remove duplicates and try again."
-      );
+      alert("Duplicate names found:\n\n" + dups.map((n) => `• ${n}`).join("\n") + "\n\nPlease remove duplicates and try again.");
       return;
     }
+    setTournaments((prev) => prev.map((tn) => {
+      if (tn.id !== tournamentId) return tn;
+      const maxR = maxRound(tn); if (maxR > 1) { alert("Cannot add entries after Round 1."); return tn; }
+      const existingNamesSet = new Set(tn.teams.map((t) => t.name.toLowerCase()));
+      const toAddNames = uniqueNames(newNames).filter((n) => !existingNamesSet.has(n.toLowerCase()));
+      if (toAddNames.length === 0) return tn;
+      const newTeams = toAddNames.map((n) => ({ id: uid(), name: n }));
+      const allTeams = [...tn.teams, ...newTeams];
+      const idByName = Object.fromEntries(allTeams.map((t) => [t.name, t.id]));
+      let matches = tn.matches.map((m) => ({ ...m }));
 
-    setTournaments((prev) =>
-      prev.map((tn) => {
-        if (tn.id !== tournamentId) return tn;
-
-        const maxR = maxRound(tn);
-        if (maxR > 1) {
-          alert("Cannot add entries after the tournament has advanced beyond Round 1.");
-          return tn;
-        }
-
-        const existingNamesSet = new Set(tn.teams.map((t) => t.name.toLowerCase()));
-        const toAddNames = uniqueNames(newNames).filter((n) => !existingNamesSet.has(n.toLowerCase()));
-        if (toAddNames.length === 0) return tn;
-
-        const newTeams = toAddNames.map((n) => ({ id: uid(), name: n }));
-        const allTeams = [...tn.teams, ...newTeams];
-        const idByName = Object.fromEntries(allTeams.map((t) => [t.name, t.id]));
-
-        let matches = tn.matches.map((m) => ({ ...m }));
-
-        // fill BYEs in R1 first
-        const r1_before = matches.filter((m) => m.round === 1);
-        const byeSlots = [];
-        for (const m of r1_before) {
-          if (!m.aId) byeSlots.push({ mid: m.id, side: "a" });
-          if (!m.bId) byeSlots.push({ mid: m.id, side: "b" });
-        }
-
-        const nameQueue = [...toAddNames];
-        for (const slot of byeSlots) {
-          if (nameQueue.length === 0) break;
-          const name = nameQueue.shift();
-          const id = idByName[name];
-          const mi = matches.findIndex((x) => x.id === slot.mid);
-          if (mi >= 0) {
-            if (slot.side === "a") matches[mi].aId = id;
-            else matches[mi].bId = id;
-            if (matches[mi].aId && matches[mi].bId) {
-              matches[mi].status = "Scheduled";
-              matches[mi].winnerId = null;
-            }
-          }
-        }
-
-        // if still more names, append new R1 matches
-        while (nameQueue.length > 0) {
-          const aName = nameQueue.shift();
-          const bName = nameQueue.shift() || null;
-          const aId = idByName[aName];
-          const bId = bName ? idByName[bName] : null;
-          const bye = !aId || !bId;
-          let winnerId = null;
-          if (bye) winnerId = aId || bId || null;
-
-          matches.push({
-            id: uid(),
-            round: 1,
-            aId,
-            bId,
-            status: bye ? "BYE" : "Scheduled",
-            winnerId,
-          });
-        }
-
-        const updated = { ...tn, teams: allTeams, matches };
-        setNamesText("");
-        setBuilderTeams([]);
-        return updated;
-      })
-    );
+      const r1_before = matches.filter((m) => m.round === 1);
+      const byeSlots = [];
+      for (const m of r1_before) { if (!m.aId) byeSlots.push({ mid: m.id, side: "a" }); if (!m.bId) byeSlots.push({ mid: m.id, side: "b" }); }
+      const nameQueue = [...toAddNames];
+      for (const slot of byeSlots) {
+        if (nameQueue.length === 0) break;
+        const name = nameQueue.shift(), id = idByName[name]; const mi = matches.findIndex((x) => x.id === slot.mid);
+        if (mi >= 0) { if (slot.side === "a") matches[mi].aId = id; else matches[mi].bId = id;
+          if (matches[mi].aId && matches[mi].bId) { matches[mi].status = "Scheduled"; matches[mi].winnerId = null; } }
+      }
+      while (nameQueue.length > 0) {
+        const aName = nameQueue.shift(), bName = nameQueue.shift() || null;
+        const aId = idByName[aName], bId = bName ? idByName[bName] : null;
+        const bye = !aId || !bId;
+        matches.push({ id: uid(), round: 1, aId, bId, status: bye ? "BYE" : "Scheduled", winnerId: bye ? (aId || bId || null) : null });
+      }
+      const updated = { ...tn, teams: allTeams, matches };
+      setNamesText(""); setBuilderTeams([]);
+      return updated;
+    }));
   }
 
-  /* --------- Create tournament (with duplicate guard & 2|4 seeding) --------- */
   function createTournament() {
     if (!isAdmin) return alert("Admin only.");
     if (targetTournamentId !== NEW_TOURNEY_SENTINEL) {
-      const names = builderTeams.length
-        ? builderTeams.map((b) => b.name)
-        : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      const names = builderTeams.length ? builderTeams.map((b) => b.name) : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       applyEntriesToTournament(targetTournamentId, names);
       return;
     }
-
     if (!tName.trim()) return alert("Please enter a Tournament Name.");
     if (builderTeams.length < 2) return alert("Please add at least 2 entries.");
 
-    // duplicate guard on builderTeams
     const names = builderTeams.map((t) => t.name);
     const dups = findDuplicateNamesCaseInsensitive(names);
-    if (dups.length > 0) {
-      alert(
-        "Duplicate names found:\n\n" +
-        dups.map((n) => `• ${n}`).join("\n") +
-        "\n\nPlease remove duplicates and try again."
-      );
-      return;
-    }
+    if (dups.length > 0) return alert("Duplicate names found:\n\n" + dups.map((n) => `• ${n}`).join("\n"));
 
-    // seeding guard: 2 or 4 seeds; all distinct and present
     const picked = [seed1, seed2, seed3, seed4].filter(Boolean);
     if (picked.length < 2) return alert("Select at least Seed 1 and Seed 2.");
-    if (!(picked.length === 2 || picked.length === 4)) {
-      return alert("You can select either 2 seeds or 4 seeds (not 3).");
-    }
+    if (!(picked.length === 2 || picked.length === 4)) return alert("You can select either 2 seeds or 4 seeds (not 3).");
     const setPicked = new Set(picked.map((s) => s.trim().toLowerCase()));
-    if (setPicked.size !== picked.length) {
-      return alert("Seeds must be different players.");
-    }
+    if (setPicked.size !== picked.length) return alert("Seeds must be different players.");
     const nameIndex = Object.fromEntries(builderTeams.map((tm) => [tm.name.toLowerCase(), true]));
-    for (const s of picked) {
-      if (!nameIndex[s.toLowerCase()]) return alert(`Seed not in entries: ${s}`);
-    }
+    for (const s of picked) if (!nameIndex[s.toLowerCase()]) return alert(`Seed not in entries: ${s}`);
 
-    const matches = generateRound1Matches(builderTeams, {
-      s1: seed1,
-      s2: seed2,
-      s3: picked.length === 4 ? seed3 : null,
-      s4: picked.length === 4 ? seed4 : null,
-    });
+    const matches = generateRound1Matches(builderTeams, { s1: seed1, s2: seed2, s3: picked.length === 4 ? seed3 : null, s4: picked.length === 4 ? seed4 : null });
+    const seedTopId = builderTeamMap[seed1], seedBottomId = builderTeamMap[seed2];
+    const seed3Id = picked.length === 4 ? builderTeamMap[seed3] : null, seed4Id = picked.length === 4 ? builderTeamMap[seed4] : null;
 
-    const seedTopId = builderTeamMap[seed1];
-    const seedBottomId = builderTeamMap[seed2];
-    const seed3Id = picked.length === 4 ? builderTeamMap[seed3] : null;
-    const seed4Id = picked.length === 4 ? builderTeamMap[seed4] : null;
-
-    const tourney = {
-      id: uid(),
-      name: tName.trim(),
-      createdAt: Date.now(),
-      teams: builderTeams,
-      matches,
-      status: "active",
-      seedTopId,
-      seedBottomId,
-      seed3Id,
-      seed4Id,
-      championId: null,
-    };
+    const tourney = { id: uid(), name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active", seedTopId, seedBottomId, seed3Id, seed4Id, championId: null };
     setTournaments((prev) => [tourney, ...prev]);
 
-    setTName("");
-    setNamesText("");
-    setSeed1("");
-    setSeed2("");
-    setSeed3("");
-    setSeed4("");
-    setBuilderTeams([]);
-    setTargetTournamentId(NEW_TOURNEY_SENTINEL);
-    setTab("fixtures");
+    setTName(""); setNamesText(""); setSeed1(""); setSeed2(""); setSeed3(""); setSeed4(""); setBuilderTeams([]);
+    setTargetTournamentId(NEW_TOURNEY_SENTINEL); setTab("fixtures");
   }
 
-  // Save
   const saveAll = async () => {
     if (!isAdmin) return alert("Admin only.");
-    try {
-      await saveStore({ tournaments, deleted: deletedTournaments });
-      alert("Saved.");
-    } catch (e) {
-      console.error(e);
-      alert("Save failed. Check console.");
-    }
+    try { await saveStore({ tournaments, deleted: deletedTournaments }); alert("Saved."); }
+    catch (e) { console.error(e); alert("Save failed. Check console."); }
   };
 
   const gpStyles = `
@@ -1116,55 +727,43 @@ export default function TournamentMaker() {
   const completedTournaments = tournaments.filter((tn) => tn.status === "completed");
 
   return (
-    <div className="p-4 text-white min-h-screen pageBg" style={{ position: "relative", zIndex: 1 }}>
+    <div className="p-3 sm:p-4 text-white min-h-screen pageBg" style={{ position: "relative", zIndex: 1 }}>
       <style>{gpStyles}</style>
 
-      <section className="relative rounded-2xl overflow-hidden border mb-4 min-h-[25vh] flex items-center" style={{ borderColor: TM_BLUE }}>
-        <div className="relative p-6 md:p-8 w-full gpGroup">
-          <h1 className="text-5xl md:text-7xl lg:text-8xl font-extrabold tracking-widest text-center select-none">
+      <section className="relative rounded-2xl overflow-hidden border mb-3 sm:mb-4 min-h-[18vh] sm:min-h-[25vh] flex items-center" style={{ borderColor: TM_BLUE }}>
+        <div className="relative p-4 sm:p-6 md:p-8 w-full gpGroup">
+          <h1 className="text-4xl sm:text-5xl md:text-7xl lg:text-8xl font-extrabold tracking-widest text-center select-none">
             <span className="gp3d" style={{ color: "#ffffff" }}>GAME</span>
             <span className="gp3d ml-2" style={{ color: "#ffffff" }}>PORT</span>
           </h1>
         </div>
       </section>
 
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex gap-2">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-3 mb-3 sm:mb-4">
+        <div className="flex flex-wrap gap-2">
           {isAdmin && <TabButton id="schedule" label="SCHEDULE" tab={tab} setTab={setTab} />}
           <TabButton id="fixtures" label="FIXTURES" tab={tab} setTab={setTab} />
           <TabButton id="standings" label="STANDINGS" tab={tab} setTab={setTab} />
           <TabButton id="winners" label="WINNERS" tab={tab} setTab={setTab} />
           {isAdmin && <TabButton id="deleted" label="DELETED" tab={tab} setTab={setTab} />}
         </div>
-        <div className="flex gap-2 items-center">
+        <div className="flex flex-wrap gap-2 items-center">
           {(tab === "fixtures" || (tab === "deleted" && isAdmin)) && (
-            <button className="px-3 py-2 border rounded hover:opacity-90" style={{ borderColor: TM_BLUE }} onClick={saveAll}>
-              Save
-            </button>
+            <button className="px-3 py-2 border rounded hover:opacity-90" style={{ borderColor: TM_BLUE }} onClick={saveAll}>Save</button>
           )}
           {!isAdmin ? (
-            <button className="px-3 py-2 border rounded hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => setShowLogin(true)}>
-              Admin Login
-            </button>
+            <button className="px-3 py-2 border rounded hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => setShowLogin(true)}>Admin Login</button>
           ) : (
-            <button
-              className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
-              onClick={() => {
-                setIsAdmin(false);
-                localStorage.removeItem("gp_is_admin");
-                if (tab === "schedule" || tab === "deleted") setTab("fixtures");
-              }}
-            >
-              Logout
-            </button>
+            <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
+              onClick={() => { setIsAdmin(false); localStorage.removeItem("gp_is_admin"); if (tab === "schedule" || tab === "deleted") setTab("fixtures"); }}>Logout</button>
           )}
         </div>
       </div>
 
       {/* Admin Login */}
       {showLogin && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="w-[90vw] max-w-sm border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-3">
+          <div className="w-full max-w-sm border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
             <div className="flex items-center justify-between mb-2">
               <h3 className="font-semibold">Admin Login</h3>
               <button className="w-6 h-6 border border-white rounded text-xs hover:bg-white hover:text-black" onClick={() => setShowLogin(false)}>×</button>
@@ -1172,14 +771,8 @@ export default function TournamentMaker() {
             <form onSubmit={(e) => {
               e.preventDefault();
               if (loginId === ADMIN_USERNAME && loginPw === ADMIN_PASSWORD) {
-                setIsAdmin(true);
-                localStorage.setItem("gp_is_admin", "1");
-                setShowLogin(false);
-                setLoginId("");
-                setLoginPw("");
-              } else {
-                alert("Invalid credentials");
-              }
+                setIsAdmin(true); localStorage.setItem("gp_is_admin", "1"); setShowLogin(false); setLoginId(""); setLoginPw("");
+              } else { alert("Invalid credentials"); }
             }} className="space-y-3">
               <div>
                 <label className="text-xs">Admin ID</label>
@@ -1198,17 +791,15 @@ export default function TournamentMaker() {
 
       {/* Delete confirm */}
       {showDeleteModal && isAdmin && (
-        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
-          <div className="w-[90vw] max-w-md border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-3">
+          <div className="w-full max-w-md border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
             <h3 className="font-semibold mb-2">Confirm Delete</h3>
-            <p className="text-sm text-white/80 mb-3">
-              Re-enter your admin <b>password</b> to delete. It will be moved to the <b>DELETED</b> tab (not permanently erased).
-            </p>
+            <p className="text-sm text-white/80 mb-3">Re-enter your admin <b>password</b> to delete. It will be moved to the <b>DELETED</b> tab.</p>
             <div className="mb-3">
               <label className="text-xs">Admin Password</label>
               <input type="password" className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={deletePw} onChange={(e) => setDeletePw(e.target.value)} placeholder="password" />
             </div>
-            <div className="flex gap-2 justify-end">
+            <div className="flex flex-wrap gap-2 justify-end">
               <button className="px-3 py-2 border rounded border-zinc-400 text-zinc-200 hover:bg-zinc-200 hover:text-black" onClick={cancelDelete}>Cancel</button>
               <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={confirmDelete}>Delete</button>
             </div>
@@ -1218,27 +809,25 @@ export default function TournamentMaker() {
 
       {/* SCHEDULE */}
       {tab === "schedule" && (isAdmin ? (
-        <section className="grid md:grid-cols-2 gap-4">
-          <div className="border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
+        <section className="grid md:grid-cols-2 gap-3 sm:gap-4">
+          <div className="border rounded-2xl p-3 sm:p-4 glass" style={{ borderColor: TM_BLUE }}>
             <h2 className="font-semibold mb-3">Tournament Setup</h2>
 
             <label className="text-xs block mb-3">
               Tournament
-              <DarkSelect
-                className="mt-1"
-                value={targetTournamentId}
-                onChange={setTargetTournamentId}
-                options={[
-                  { value: NEW_TOURNEY_SENTINEL, label: "➕ Create New Tournament" },
-                  ...tournaments.map(t => ({ value: t.id, label: t.name })),
-                ]}
-              />
+              <div className="mt-1">
+                <DarkSelect
+                  value={targetTournamentId}
+                  onChange={setTargetTournamentId}
+                  options={[{ value: NEW_TOURNEY_SENTINEL, label: "➕ Create New Tournament" }, ...tournaments.map(t => ({ value: t.id, label: t.name }))]}
+                />
+              </div>
             </label>
 
             {targetTournamentId === NEW_TOURNEY_SENTINEL && (
               <label className="text-xs block mb-3">
                 Tournament Name
-                <input className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={tName} onChange={(e) => setTName(e.target.value)} placeholder="e.g., Office TT Cup — Aug 2025" />
+                <input className="mt-1 w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={tName} onChange={(e) => setTName(e.target.value)} placeholder="e.g., Office TT Cup — Aug 2025" />
               </label>
             )}
 
@@ -1250,24 +839,17 @@ Devi
 Rahul
 Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
 
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 justify-between mb-2">
               <div>
                 <input ref={uploadRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
-                  onChange={async (e) => {
-                    const f = e.target.files?.[0];
-                    if (!f) return;
-                    await handlePlayersUpload(f);
-                    if (uploadRef.current) uploadRef.current.value = "";
-                  }}
+                  onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; await handlePlayersUpload(f); if (uploadRef.current) uploadRef.current.value = ""; }}
                 />
                 <button
                   className={`px-3 py-2 border rounded inline-flex items-center gap-2 ${
                     targetTournamentId !== NEW_TOURNEY_SENTINEL ? "border-zinc-700 text-zinc-500 cursor-not-allowed" : "border-white hover:bg-white hover:text-black"
                   }`}
                   title="Upload Entry"
-                  onClick={() => {
-                    if (targetTournamentId === NEW_TOURNEY_SENTINEL && uploadRef.current) uploadRef.current.click();
-                  }}
+                  onClick={() => { if (targetTournamentId === NEW_TOURNEY_SENTINEL && uploadRef.current) uploadRef.current.click(); }}
                   disabled={targetTournamentId !== NEW_TOURNEY_SENTINEL}
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
@@ -1286,8 +868,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                     : () =>
                         applyEntriesToTournament(
                           targetTournamentId,
-                          builderTeams.length
-                            ? builderTeams.map((b) => b.name)
+                          builderTeams.length ? builderTeams.map((b) => b.name)
                             : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
                         )
                 }
@@ -1297,42 +878,34 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
             </div>
 
             {targetTournamentId === NEW_TOURNEY_SENTINEL && builderTeams.length > 0 && (
-              <div className="my-3 grid sm:grid-cols-2 gap-4 items-center">
+              <div className="my-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <label className="text-xs">
                   Seed 1
-                  <DarkSelect
-                    className="mt-1"
-                    value={seed1}
-                    onChange={setSeed1}
-                    options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]}
-                  />
+                  <div className="mt-1">
+                    <DarkSelect value={seed1} onChange={setSeed1}
+                      options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]} />
+                  </div>
                 </label>
                 <label className="text-xs">
                   Seed 2
-                  <DarkSelect
-                    className="mt-1"
-                    value={seed2}
-                    onChange={setSeed2}
-                    options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]}
-                  />
+                  <div className="mt-1">
+                    <DarkSelect value={seed2} onChange={setSeed2}
+                      options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]} />
+                  </div>
                 </label>
                 <label className="text-xs">
                   Seed 3 (optional)
-                  <DarkSelect
-                    className="mt-1"
-                    value={seed3}
-                    onChange={setSeed3}
-                    options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]}
-                  />
+                  <div className="mt-1">
+                    <DarkSelect value={seed3} onChange={setSeed3}
+                      options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]} />
+                  </div>
                 </label>
                 <label className="text-xs">
                   Seed 4 (optional)
-                  <DarkSelect
-                    className="mt-1"
-                    value={seed4}
-                    onChange={setSeed4}
-                    options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]}
-                  />
+                  <div className="mt-1">
+                    <DarkSelect value={seed4} onChange={setSeed4}
+                      options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]} />
+                  </div>
                 </label>
                 <p className="sm:col-span-2 text-[11px] text-white/70">
                   Seeding rules: Seed 1 & 2 opposite ends (final only). Seeds 3 & 4 in opposite halves (final only). Top-4 meet no earlier than SF.
@@ -1340,14 +913,14 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
               </div>
             )}
 
-            <div className="mt-6 text-center">
-              <button className="px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black" onClick={createTournament}>
+            <div className="mt-4 sm:mt-6 text-center">
+              <button className="w-full sm:w-auto px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black" onClick={createTournament}>
                 {targetTournamentId === NEW_TOURNEY_SENTINEL ? "Create Tournament" : "Apply Entries to Selected"}
               </button>
             </div>
           </div>
 
-          <div className="border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
+          <div className="border rounded-2xl p-3 sm:p-4 glass" style={{ borderColor: TM_BLUE }}>
             <h2 className="font-semibold mb-3">Tips</h2>
             <ul className="list-disc ml-5 text-sm text-white/90 space-y-1">
               <li>Select a tournament or create a new one.</li>
@@ -1357,7 +930,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
           </div>
         </section>
       ) : (
-        <section className="border rounded-2xl p-6 text-sm glass" style={{ borderColor: TM_BLUE }}>
+        <section className="border rounded-2xl p-4 text-sm glass" style={{ borderColor: TM_BLUE }}>
           Viewer mode. Please <button className="underline" onClick={() => setShowLogin(true)}>login as Admin</button> to access SCHEDULE.
         </section>
       ))}
@@ -1383,41 +956,25 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 title={tn.name}
                 subtitle={`Active • ${tn.teams.length} players`}
                 right={
-                  <div className="flex items-center gap-2">
+                  <>
                     {isAdmin && (
                       <button className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => openDeleteModal(tn.id)} title="Delete tournament">
                         Delete
                       </button>
                     )}
-                    <button
-                      className="px-2 py-1 rounded border hover:bg-white hover:text-black"
-                      style={{ borderColor: TM_BLUE }}
-                      onClick={() => exportTournamentToPDF(tn)}
-                    >
-                      Export PDF
-                    </button>
-                    <button
-                      className="px-2 py-1 rounded border hover:bg-white hover:text-black"
-                      style={{ borderColor: TM_BLUE }}
-                      onClick={() => exportTournamentToExcel(tn)}
-                    >
-                      Export Excel
-                    </button>
-                    <span className="text-xs text-white/70">
-                      Current: {stageShort(counts.get(mr) || 0)}
-                    </span>
+                    <button className="px-2 py-1 rounded border hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => exportTournamentToPDF(tn)}>Export PDF</button>
+                    <button className="px-2 py-1 rounded border hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => exportTournamentToExcel(tn)}>Export Excel</button>
+                    <span className="text-xs text-white/70">Current: {stageShort(counts.get(mr) || 0)}</span>
                     {isAdmin && (
                       <button
-                        className={`px-3 py-2 rounded-xl border transition ${
-                          canNext ? "border-white hover:bg-white hover:text-black" : "border-zinc-700 text-zinc-500 cursor-not-allowed"
-                        }`}
+                        className={`px-3 py-2 rounded-xl border transition ${canNext ? "border-white hover:bg-white hover:text-black" : "border-zinc-700 text-zinc-500 cursor-not-allowed"}`}
                         disabled={!canNext}
                         onClick={() => generateNextRound(tn.id)}
                       >
                         Generate Next Round
                       </button>
                     )}
-                  </div>
+                  </>
                 }
                 defaultOpen={true}
               >
@@ -1452,34 +1009,24 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
           {tournaments.map((tn) => {
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
             const byRound = new Map();
-            for (const m of tn.matches) {
-              if (!byRound.has(m.round)) byRound.set(m.round, []);
-              byRound.get(m.round).push(m);
-            }
+            for (const m of tn.matches) { if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
             const ordered = Array.from(byRound.entries()).sort((a, b) => a[0] - b[0]);
             const mr = tn.matches.length ? Math.max(...tn.matches.map((m) => m.round)) : 1;
             const currentCount = (ordered.find(([r]) => r === mr)?.[1].length) || 0;
-            const subtitle =
-              tn.status === "completed"
-                ? `Completed • Champion: ${tn.championId ? teamMap[tn.championId] || "TBD" : "TBD"}`
-                : `Active • Current: ${stageShort(currentCount)}`;
+            const subtitle = tn.status === "completed"
+              ? `Completed • Champion: ${tn.championId ? teamMap[tn.championId] || "TBD" : "TBD"}`
+              : `Active • Current: ${stageShort(currentCount)}`;
 
             return (
               <Collapsible
                 key={tn.id}
                 title={tn.name}
                 subtitle={subtitle}
-                right={
-                  isAdmin ? (
-                    <button
-                      className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
-                      onClick={() => openDeleteModal(tn.id)}
-                      title="Delete tournament"
-                    >
-                      Delete
-                    </button>
-                  ) : null
-                }
+                right={isAdmin ? (
+                  <button className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => openDeleteModal(tn.id)} title="Delete tournament">
+                    Delete
+                  </button>
+                ) : null}
                 defaultOpen={false}
               >
                 {ordered.map(([round, arr]) => (
@@ -1494,13 +1041,9 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                         return (
                           <li key={m.id}>
                             {isFinals ? (
-                              <>
-                                {a} vs {b} — {w ? <b>{w}</b> : <span className="text-zinc-400">TBD</span>}
-                              </>
+                              <>{a} vs {b} — {w ? <b>{w}</b> : <span className="text-zinc-400">TBD</span>}</>
                             ) : (
-                              <>
-                                Match {i + 1}: {a} vs {b} — {w ? <b>{w}</b> : <span className="text-zinc-400">TBD</span>}
-                              </>
+                              <>Match {i + 1}: {a} vs {b} — {w ? <b>{w}</b> : <span className="text-zinc-400">TBD</span>}</>
                             )}
                           </li>
                         );
@@ -1517,40 +1060,25 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
       {/* WINNERS */}
       {tab === "winners" && (
         <section>
-          {completedTournaments.length === 0 && (
-            <p className="text-white/80 text-sm">No completed tournaments yet. Finish one in <b>FIXTURES</b>.</p>
-          )}
+          {completedTournaments.length === 0 && <p className="text-white/80 text-sm">No completed tournaments yet. Finish one in <b>FIXTURES</b>.</p>}
           {completedTournaments.map((tn) => {
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
             const byRound = new Map();
-            for (const m of tn.matches) {
-              if (!m.winnerId) continue;
-              if (!byRound.has(m.round)) byRound.set(m.round, []);
-              byRound.get(m.round).push(m);
-            }
-            const ordered = Array.from(byRound.entries())
-              .sort((a, b) => a[0] - b[0])
-              .filter(([_, arr]) => {
-                const code = stageShort(arr.length);
-                return code === "F" || code === "SF";
-              });
+            for (const m of tn.matches) { if (!m.winnerId) continue; if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
+            const ordered = Array.from(byRound.entries()).sort((a, b) => a[0] - b[0]).filter(([_, arr]) => {
+              const code = stageShort(arr.length); return code === "F" || code === "SF";
+            });
             const championName = tn.championId ? teamMap[tn.championId] || "TBD" : "TBD";
             return (
               <Collapsible
                 key={tn.id}
                 title={tn.name}
                 subtitle={`Champion: ${championName}`}
-                right={
-                  isAdmin ? (
-                    <button
-                      className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
-                      onClick={() => openDeleteModal(tn.id)}
-                      title="Delete tournament"
-                    >
-                      Delete
-                    </button>
-                  ) : null
-                }
+                right={isAdmin ? (
+                  <button className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => openDeleteModal(tn.id)} title="Delete tournament">
+                    Delete
+                  </button>
+                ) : null}
                 defaultOpen={false}
               >
                 {ordered.length === 0 ? (
@@ -1566,15 +1094,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                           const w = teamMap[m.winnerId] || "TBD";
                           return (
                             <li key={m.id}>
-                              {arr.length === 1 ? (
-                                <>
-                                  {a} vs {b} — <b>{w}</b>
-                                </>
-                              ) : (
-                                <>
-                                  Match {i + 1}: {a} vs {b} — <b>{w}</b>
-                                </>
-                              )}
+                              {arr.length === 1 ? (<>{a} vs {b} — <b>{w}</b></>) : (<>Match {i + 1}: {a} vs {b} — <b>{w}</b></>)}
                             </li>
                           );
                         })}
@@ -1603,50 +1123,26 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                   title={tn.name}
                   subtitle={subtitle}
                   right={
-                    <div className="flex items-center gap-2">
-                      <button
-                        className="px-3 py-1 rounded border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
-                        onClick={() => restoreTournament(tn.id)}
-                        title="Restore to Fixtures"
-                      >
-                        Restore
-                      </button>
-                      <button
-                        className="px-3 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
-                        onClick={() => deleteForever(tn.id)}
-                        title="Delete permanently"
-                      >
-                        Delete Permanently
-                      </button>
+                    <div className="flex flex-wrap gap-2">
+                      <button className="px-3 py-1 rounded border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black" onClick={() => restoreTournament(tn.id)} title="Restore to Fixtures">Restore</button>
+                      <button className="px-3 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => deleteForever(tn.id)} title="Delete permanently">Delete Permanently</button>
                     </div>
                   }
                   defaultOpen={false}
                 >
                   <div className="text-sm space-y-2">
-                    <div>
-                      <b>Status when deleted:</b> {tn.status}
-                      {tn.status === "completed" && tn.championId ? ` • Champion: ${teamMap[tn.championId] || "TBD"}` : ""}
-                    </div>
+                    <div><b>Status when deleted:</b> {tn.status}{tn.status === "completed" && tn.championId ? ` • Champion: ${teamMap[tn.championId] || "TBD"}` : ""}</div>
                     <div>
                       <b>Players:</b>
-                      <ul className="list-disc ml-5">
-                        {tn.teams.map((t) => (
-                          <li key={t.id}>{t.name}</li>
-                        ))}
-                      </ul>
+                      <ul className="list-disc ml-5">{tn.teams.map((t) => (<li key={t.id}>{t.name}</li>))}</ul>
                     </div>
                     <div>
                       <b>Matches:</b>
                       <ul className="list-disc ml-5">
                         {tn.matches.map((m) => {
-                          const a = teamMap[m.aId] || "BYE/TBD";
-                          const b = teamMap[m.bId] || "BYE/TBD";
+                          const a = teamMap[m.aId] || "BYE/TBD"; const b = teamMap[m.bId] || "BYE/TBD";
                           const w = m.winnerId ? teamMap[m.winnerId] || "TBD" : "TBD";
-                          return (
-                            <li key={m.id}>
-                              Round {m.round}: {a} vs {b} — Winner: {w}
-                            </li>
-                          );
+                          return (<li key={m.id}>Round {m.round}: {a} vs {b} — Winner: {w}</li>);
                         })}
                       </ul>
                     </div>
@@ -1657,12 +1153,12 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
           )}
         </section>
       ) : (
-        <section className="border rounded-2xl p-6 text-sm glass" style={{ borderColor: TM_BLUE }}>
+        <section className="border rounded-2xl p-4 text-sm glass" style={{ borderColor: TM_BLUE }}>
           Viewer mode. Please <button className="underline" onClick={() => setShowLogin(true)}>login as Admin</button> to access DELETED.
         </section>
       ))}
 
-      <footer className="fixed bottom-4 right-6 text-2xl font-bold text-white/80">CV ENGG TML</footer>
+      <footer className="fixed bottom-3 right-3 sm:bottom-4 sm:right-6 text-lg sm:text-2xl font-bold text-white/80">CV ENGG TML</footer>
     </div>
   );
 }
@@ -1670,11 +1166,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
 /* Minimal sanity checks in console (disabled) */
 (function runDevTests() {
   try {
-    const IS_DEV = false;
-    if (!IS_DEV) return;
-    const eq = (name, got, exp) =>
-      console.log(`[TEST] ${name}:`, Array.isArray(exp) ? JSON.stringify(got) === JSON.stringify(exp) : got === exp ? "PASS" : "FAIL");
-  } catch (e) {
-    console.warn("Dev tests error:", e);
-  }
+    const IS_DEV = false; if (!IS_DEV) return;
+    const eq = (name, got, exp) => console.log(`[TEST] ${name}:`, Array.isArray(exp) ? JSON.stringify(got) === JSON.stringify(exp) : got === exp ? "PASS" : "FAIL");
+  } catch (e) { console.warn("Dev tests error:", e); }
 })();

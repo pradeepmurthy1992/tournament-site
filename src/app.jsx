@@ -239,17 +239,17 @@ async function exportTournamentToPDF(tn) {
   // Quick lookup for team names
   const teamMap = Object.fromEntries((tn.teams || []).map((t) => [t.id, t.name]));
 
-  // Layout constants - optimized for A3
-  const boxW = 180;        // Reduced box width
-  const boxH = 42;         // Reduced box height
-  const colGap = 35;       // Reduced column gap
-  const vGap = 8;          // Reduced vertical gap
+  // Layout constants
+  const boxW = 200;
+  const boxH = 50;
+  const colGap = 50;
+  const vGap = 20; // base vertical gap
 
-  // PDF setup - A3 landscape
-  const pdf = new jsPDFCtor({ orientation: "landscape", unit: "pt", format: "a3" });
-  const pageW = pdf.internal.pageSize.getWidth();  // A3 landscape: ~1190pt
-  const pageH = pdf.internal.pageSize.getHeight(); // A3 landscape: ~842pt
-  const margin = 30;       // Reduced margin
+  // PDF setup
+  const pdf = new jsPDFCtor({ orientation: "landscape", unit: "pt", format: "a4" });
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const margin = 36;
   const BG = "#ffffff";
   const FG = "#000000";
 
@@ -258,36 +258,30 @@ async function exportTournamentToPDF(tn) {
   pdf.rect(0, 0, pageW, pageH, "F");
   pdf.setTextColor(FG);
   pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(16);     // Slightly smaller title
-  pdf.text(`${tn.name} — Fixtures`, margin, margin + 16);
+  pdf.setFontSize(18);
+  pdf.text(`${tn.name} — Fixtures`, margin, margin + 6);
 
   // Calculate column X positions
   const colX = Array.from({ length: rounds.length }, (_, i) => i * (boxW + colGap));
   
-  // Calculate total dimensions
+  // Calculate total width for scaling
   const totalW = rounds.length * boxW + (rounds.length - 1) * colGap;
-  const availableW = pageW - margin * 2;
-  const availableH = pageH - (margin * 2 + 30);
+  const maxW = pageW - margin * 2;
+  const maxH = pageH - (margin * 2 + 30);
   
   // Calculate positions for each round
   const positions = [];
   
-  // First round: tightly spaced
+  // First round: evenly spaced
   const r1Matches = rounds[0].matches.length;
   const r1TotalH = r1Matches * boxH + (r1Matches - 1) * vGap;
-  
-  // Scale to fit both width and height optimally
-  const scaleW = availableW / totalW;
-  const scaleH = availableH / r1TotalH;
-  const scale = Math.min(1.2, scaleW, scaleH); // Allow slight upscaling up to 1.2x
+  const scale = Math.min(1, maxW / totalW, maxH / r1TotalH);
   
   positions[0] = [];
-  const startY = (availableH - r1TotalH * scale) / 2; // Center vertically
-  
   for (let i = 0; i < r1Matches; i++) {
     positions[0][i] = {
       x: colX[0],
-      y: startY + i * (boxH + vGap),
+      y: i * (boxH + vGap),
       w: boxW,
       h: boxH
     };
@@ -318,8 +312,8 @@ async function exportTournamentToPDF(tn) {
     }
   }
 
-  const originX = margin + (availableW - totalW * scale) / 2; // Center horizontally
-  const originY = margin + 25;
+  const originX = margin;
+  const originY = margin + 40;
 
   // Draw all boxes and content
   for (let r = 0; r < rounds.length; r++) {
@@ -334,21 +328,21 @@ async function exportTournamentToPDF(tn) {
       const w = scale * pos.w;
       const h = scale * pos.h;
 
-      // Draw box with thinner border
+      // Draw box
       pdf.setDrawColor(0);
-      pdf.setLineWidth(0.8);
+      pdf.setLineWidth(Math.max(0.6, 0.6 * scale));
       pdf.rect(x, y, w, h, "S");
 
-      // Draw content with optimized font sizes
-      const titleFontSize = Math.max(7, 8 * scale);
-      const playerFontSize = Math.max(8, 9 * scale);
-      const padding = 4 * scale;
+      // Draw content
+      const titleFontSize = 9 * scale;
+      const playerFontSize = 10 * scale;
+      const padding = 6 * scale;
 
       // Match title
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(titleFontSize);
       pdf.setTextColor(FG);
-      pdf.text(`Match M${matchNoById.get(m.id)}`, x + padding, y + 10 * scale);
+      pdf.text(`Match M${matchNoById.get(m.id)}`, x + padding, y + 12 * scale);
 
       // Player names or placeholders
       pdf.setFont("helvetica", "normal");
@@ -357,39 +351,33 @@ async function exportTournamentToPDF(tn) {
       let line1Text, line2Text;
 
       if (r === 0) {
-        // First round: actual player names (truncate if too long)
+        // First round: actual player names
         const aName = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
         const bName = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
-        
-        // Truncate long names
-        const maxChars = Math.floor(w / (playerFontSize * 0.6));
-        const truncatedA = aName.length > maxChars ? aName.substring(0, maxChars - 3) + "..." : aName;
-        const truncatedB = bName.length > maxChars ? bName.substring(0, maxChars - 3) + "..." : bName;
-        
-        line1Text = `${truncatedA}  VS`;
-        line2Text = truncatedB;
+        line1Text = `${aName}  VS`;
+        line2Text = bName;
       } else {
-        // Later rounds: winner placeholders (shortened)
+        // Later rounds: winner placeholders
         const child1Idx = i * 2;
         const child2Idx = i * 2 + 1;
         const child1 = rounds[r - 1].matches[child1Idx];
         const child2 = rounds[r - 1].matches[child2Idx];
         const child1No = child1 ? matchNoById.get(child1.id) : "?";
         const child2No = child2 ? matchNoById.get(child2.id) : "?";
-        line1Text = `Winner M${child1No}  VS`;
-        line2Text = `Winner M${child2No}`;
+        line1Text = `[Winner of M${child1No}]  VS`;
+        line2Text = `[Winner of M${child2No}]`;
       }
 
-      // Position text with better vertical centering
-      const line1Y = y + h/2 - 3 * scale;
-      const line2Y = y + h/2 + 7 * scale;
+      // Position text vertically centered
+      const line1Y = y + h/2 - 4 * scale;
+      const line2Y = y + h/2 + 8 * scale;
 
       pdf.text(line1Text, x + padding, line1Y);
       pdf.text(line2Text, x + padding, line2Y);
     }
   }
 
-  // Draw connectors with optimized thickness
+  // Draw connectors
   for (let r = 0; r < rounds.length - 1; r++) {
     const parentMatches = rounds[r + 1].matches;
     
@@ -407,10 +395,10 @@ async function exportTournamentToPDF(tn) {
       const child2X = originX + scale * (child2Pos.x + child2Pos.w);
       const child2Y = originY + scale * (child2Pos.y + child2Pos.h/2);
 
-      const junctionX = parentX - 12 * scale; // Reduced junction distance
+      const junctionX = parentX - 15 * scale;
 
       pdf.setDrawColor(0);
-      pdf.setLineWidth(0.8);
+      pdf.setLineWidth(Math.max(0.6, 0.6 * scale));
       
       // Horizontal lines from children to junction
       pdf.line(child1X, child1Y, junctionX, child1Y);

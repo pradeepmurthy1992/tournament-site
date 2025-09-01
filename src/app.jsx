@@ -175,28 +175,6 @@ function buildMatchNumbering(rounds) {
   return { matchNoById, idByRoundIndex, childNosByParentIndex };
 }
 
-function drawRichLine(pdf, x, y, parts, opt) {
-  // parts: [{text, bold?:boolean, strike?:boolean}]
-  // opt: { font: "helvetica", size: 11, color: "#000000", strikeYOffset?: number }
-  const { font = "helvetica", size = 11, color = "#000000", strikeYOffset = -2 } = opt || {};
-  pdf.setTextColor(color);
-  let cursor = x;
-  for (const p of parts) {
-    const style = p.bold ? "bold" : "normal";
-    pdf.setFont(font, style);
-    pdf.setFontSize(size);
-    const w = pdf.getTextWidth(p.text);
-    pdf.text(p.text, cursor, y);
-    if (p.strike) {
-      // Draw a strike-through line across this token
-      const thickness = Math.max(0.6, size * 0.06);
-      const midY = y + strikeYOffset;
-      pdf.setLineWidth(thickness);
-      pdf.line(cursor, midY, cursor + w, midY);
-    }
-    cursor += w;
-  }
-}
 
 /* ===== Reworked exportTournamentToPDF ===== */
 /* ===== Updated helpers (centered strike, rich text) ===== */

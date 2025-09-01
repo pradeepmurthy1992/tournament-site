@@ -12,8 +12,6 @@ import { loadStoreOnce, saveStore /*, subscribeStore*/ } from "./db";
 /**
  * Tournament Maker — Multiple Concurrent Tournaments (TT & Badminton)
  * Tabs: SCHEDULE (admin only), FIXTURES, STANDINGS, WINNERS, DELETED (admin only)
- * Cloud persistence via ./db (e.g., JSONBin)
- * Admin auth: simple in-app username/password (change before sharing)
  */
 
 const TM_BLUE = "#0f4aa1";
@@ -24,7 +22,7 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 const ADMIN_USERNAME = "admin";
 const ADMIN_PASSWORD = "gameport123";
 
-// ---------- helpers ----------
+/* ---------------- Helpers ---------------- */
 function normalizeHeader(h) {
   return String(h || "").trim().toLowerCase();
 }
@@ -40,6 +38,22 @@ function uniqueNames(arr) {
   }
   return out;
 }
+function findDuplicateNamesCaseInsensitive(arr) {
+  const seen = new Map(); // key(lower) -> original
+  const dups = new Set();
+  for (const raw of arr) {
+    const s = String(raw || "").trim();
+    if (!s) continue;
+    const k = s.toLowerCase();
+    if (seen.has(k)) {
+      dups.add(seen.get(k));
+      dups.add(s);
+    } else {
+      seen.set(k, s);
+    }
+  }
+  return Array.from(dups);
+}
 function parseCSVPlayers(text) {
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (lines.length === 0) return [];
@@ -52,9 +66,8 @@ function parseCSVPlayers(text) {
     const cols = lines[i].split(sep);
     names.push((cols[idx] || "").trim());
   }
-  return names; // raw list, NOT unique
+  return uniqueNames(names);
 }
-
 async function parseExcelPlayers(arrayBuffer) {
   try {
     const workbook = XLSX.read(arrayBuffer, { type: "array" });
@@ -65,24 +78,11 @@ async function parseExcelPlayers(arrayBuffer) {
     const keys = Object.keys(rows[0] || {});
     const key = keys.find((k) => normalizeHeader(k) === "players");
     if (!key) return [];
-    const names = rows.map((r) => String(r[key] || "").trim()).filter(Boolean);
-    return names; // raw list, NOT unique
+    const names = rows.map((r) => r[key]).filter(Boolean);
+    return uniqueNames(names);
   } catch {
     return [];
   }
-}
-
-
-/** Short round code by match-count in that round */
-function stageShort(count) {
-  if (!Number.isFinite(count) || count <= 0) return "R?";
-  if (count === 1) return "F";
-  if (count === 2) return "SF";
-  if (count === 4) return "QF";
-  if (count === 8) return "R16";
-  if (count === 16) return "R32";
-  if (count === 32) return "R64";
-  return `R${count * 2}`;
 }
 
 function timeStr(ts) {
@@ -118,7 +118,20 @@ function groupMatchesByRound(tn) {
     .map(([round, matches]) => ({ round, matches }));
 }
 
-// ---------- Export: Excel ----------
+/** Short round code by match-count in that round (used across site & exports) */
+function stageShort(count) {
+  if (!Number.isFinite(count) || count <= 0) return "R?";
+  if (count === 1) return "F";
+  if (count === 2) return "SF";
+  if (count === 4) return "QF";
+  if (count === 8) return "R16";
+  if (count === 16) return "R32";
+  if (count === 32) return "R64";
+  return `R${count * 2}`;
+}
+function nextPow2(n) { let p = 1; while (p < n) p *= 2; return p; }
+
+/* ---------------- Excel export ---------------- */
 function exportTournamentToExcel(tn) {
   try {
     const wb = XLSX.utils.book_new();
@@ -139,9 +152,7 @@ function exportTournamentToExcel(tn) {
       });
       const ws = XLSX.utils.aoa_to_sheet(data);
       ws["!cols"] = [{ wch: 8 }, { wch: 24 }, { wch: 24 }, { wch: 20 }, { wch: 14 }];
-      // ★ Use short code for the visible sheet name
-      const label = stageShort(matches.length);
-      XLSX.utils.book_append_sheet(wb, ws, label);
+      XLSX.utils.book_append_sheet(wb, ws, stageShort(matches.length));
     }
     const fname = `${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.xlsx`;
     XLSX.writeFile(wb, fname);
@@ -151,14 +162,7 @@ function exportTournamentToExcel(tn) {
   }
 }
 
-// ---------- Export: PDF ----------
-/** Vector PDF export: no element splits, white paper, black text */
-// ---- Bracket helpers (add once, near your other helpers) ----
-function nextPow2(n){ let p=1; while(p<n) p*=2; return p; }
-
-
-
-/** Build a full (projected) bracket up to Finals, padding with placeholders */
+/* ---------------- Vector PDF bracket (white paper) ---------------- */
 function buildProjectedRounds(tn) {
   const byRound = new Map();
   for (const m of (tn.matches || [])) {
@@ -195,20 +199,14 @@ function buildProjectedRounds(tn) {
   }
   return out;
 }
-
-/** Label helpers for placeholder names */
 function feederLabel(roundMatchesCount, matchIdxZeroBased) {
-  // e.g., roundMatchesCount=4 → QF ; index 0 → QF1, index 1 → QF2...
   const label = stageShort(roundMatchesCount);
   return `${label}${matchIdxZeroBased + 1}`;
 }
-
 function placeholderName(prevRoundMatchesCount, childMatchIndex) {
-  // childMatchIndex is zero-based into previous round
   return `Winner of ${feederLabel(prevRoundMatchesCount, childMatchIndex)}`;
 }
 
-// ---- NEW Vector PDF exporter (replace your exportTournamentToPDF with this) ----
 async function exportTournamentToPDF(tn) {
   const jsPDFCtor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF || (window.jspdf && window.jspdf.default);
   if (!jsPDFCtor) { alert("jsPDF not found. Include jspdf.umd.min.js"); return; }
@@ -226,7 +224,7 @@ async function exportTournamentToPDF(tn) {
   const FG = "#000000";
   const LINE = "#000000";
 
-  // Title + meta
+  // Title
   const title = `${tn.name} — Fixtures`;
   pdf.setFillColor(BG);
   pdf.rect(0, 0, pageW, pageH, "F");
@@ -235,21 +233,20 @@ async function exportTournamentToPDF(tn) {
   pdf.setFontSize(18);
   pdf.text(title, margin, margin + 6);
 
-  // Layout measurements in "virtual" coordinates before scale-to-fit
-  const colGap = 44;      // space between rounds
-  const boxW  = 210;      // match box width for early rounds
-  const boxH0 = 34;       // base box height (Round 1)
-  const vGap0 = 16;       // vertical gap between boxes in Round 1
+  // Layout “virtual space” then scale-to-fit
+  const colGap = 44;
+  const boxW  = 210;
+  const boxH0 = 34;
+  const vGap0 = 16;
   const strokeW = 1.2;
 
-  // Box height grows slightly for later rounds (more whitespace), spacing doubles each round
   const colWidths = rounds.map((_, rIdx) => boxW * Math.max(0.75, 1 - rIdx * 0.08));
   const roundHeights = rounds.map((_, rIdx) => boxH0 + rIdx * 4);
   const roundVGaps   = rounds.map((_, rIdx) => vGap0 * Math.pow(2, rIdx));
 
-  // Compute column x positions
+  // Column x
   const colX = [];
-  let totalW = margin; // start virtual width counting from 0, margins applied after scale
+  let totalW = 0;
   for (let r = 0; r < rounds.length; r++) {
     if (r === 0) {
       colX[r] = 0;
@@ -260,81 +257,54 @@ async function exportTournamentToPDF(tn) {
     }
   }
 
-  // Compute total virtual height = enough to stack all R1 matches
   const r1Count = rounds[0].matches.length;
-  const boxH = roundHeights[0];
-  const vGap = roundVGaps[0];
-  const bodyH = r1Count * boxH + (r1Count - 1) * vGap;
-  const totalH = bodyH;
-
-  // Scale-to-fit (so everything stays on one page)
+  const bodyH = r1Count * roundHeights[0] + (r1Count - 1) * roundVGaps[0];
   const maxW = pageW - margin * 2;
-  const maxH = pageH - (margin * 2 + 18 + 10); // leave room for title
-  const scale = Math.min(1, maxW / totalW, maxH / totalH);
+  const maxH = pageH - (margin * 2 + 18 + 10);
+  const scale = Math.min(1, maxW / totalW, maxH / bodyH);
 
-  // Draw origin
   const originX = margin;
-  const originY = margin + 24; // below title
+  const originY = margin + 24;
   const S = (n) => n * scale;
 
-  // Teams map
   const teamMap = Object.fromEntries((tn.teams || []).map(t => [t.id, t.name]));
 
-  // Cache all box positions for connectors: pos[r][i] = {x,y,w,h}
+  // Cache positions: pos[r][i] = {x,y,w,h}
   const pos = rounds.map((r, rIdx) => {
     const matches = r.matches;
     const thisBoxH = roundHeights[rIdx];
     const thisVGap = roundVGaps[rIdx];
 
-    // For round r: each match spans one "row block" whose height equals
-    // (prev round's box + gap) * 2, except for Round 1 which is simple stack.
     const arr = [];
     if (rIdx === 0) {
-      // straight stack
       let y = 0;
       for (let i = 0; i < matches.length; i++) {
-        arr.push({
-          x: colX[rIdx],
-          y,
-          w: colWidths[rIdx],
-          h: thisBoxH,
-        });
+        arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH });
         y += thisBoxH + thisVGap;
       }
     } else {
-      const prevCount = rounds[rIdx - 1].matches.length;
-      const prevBoxH  = roundHeights[rIdx - 1];
-      const prevVGap  = roundVGaps[rIdx - 1];
-
-      // The vertical spacing for a round r box is exactly the "span" of its two children:
-      const childBlockH = prevBoxH + prevVGap; // height per child block
-      const myBlockH = childBlockH * 2 - prevVGap; // span of two children minus the middle gap
-      let y = (myBlockH - thisBoxH) / 2; // center within child span
-
+      const prevBoxH = roundHeights[rIdx - 1];
+      const prevVGap = roundVGaps[rIdx - 1];
+      const childBlockH = prevBoxH + prevVGap;
+      const myBlockH = childBlockH * 2 - prevVGap;
+      let y = (myBlockH - thisBoxH) / 2;
       for (let i = 0; i < matches.length; i++) {
-        arr.push({
-          x: colX[rIdx],
-          y,
-          w: colWidths[rIdx],
-          h: thisBoxH,
-        });
+        arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH });
         y += myBlockH;
       }
     }
     return arr;
   });
 
-  // Helpers (text)
-  const playerName = (id) => teamMap[id] || (id ? "Unknown" : "BYE/TBD");
   const boxText = (rIdx, iIdx, side, m) => {
     if (rIdx === 0) {
-      return playerName(side === "a" ? m.aId : m.bId);
+      return playerName(teamMap, side === "a" ? m.aId : m.bId);
     }
     const prevCount = rounds[rIdx - 1].matches.length;
     const childIndex = iIdx * 2 + (side === "a" ? 0 : 1);
     return placeholderName(prevCount, childIndex);
   };
-  const winnerText = (m) => (m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD");
+  const winTxt = (m) => (m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD");
 
   // Draw boxes + text
   pdf.setLineWidth(strokeW);
@@ -343,7 +313,7 @@ async function exportTournamentToPDF(tn) {
 
   for (let r = 0; r < rounds.length; r++) {
     const matches = rounds[r].matches;
-    const labelForRound = stageShort(matches.length);
+    const code = stageShort(matches.length);
     const thisBoxH = roundHeights[r];
 
     for (let i = 0; i < matches.length; i++) {
@@ -351,19 +321,17 @@ async function exportTournamentToPDF(tn) {
       const p = pos[r][i];
 
       // box
-      pdf.setFillColor("#ffffff");
       pdf.rect(originX + S(p.x), originY + S(p.y), S(p.w), S(p.h), "S");
 
       // text
-      pdf.setFontSize(10 * scale);
       const pad = 6 * scale;
 
-      // Round label small at top-left
       pdf.setFont("helvetica", "bold");
-      pdf.text(labelForRound, originX + S(p.x) + pad, originY + S(p.y) + pad + 8 * scale);
+      pdf.setFontSize(10 * scale);
+      pdf.text(code, originX + S(p.x) + pad, originY + S(p.y) + pad + 8 * scale);
 
-      // names
       pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(10 * scale);
       const aY = originY + S(p.y) + pad + 18 * scale;
       const bY = originY + S(p.y) + pad + 34 * scale;
 
@@ -372,47 +340,35 @@ async function exportTournamentToPDF(tn) {
       pdf.text(aTxt, originX + S(p.x) + pad, aY);
       pdf.text(bTxt, originX + S(p.x) + pad, bY);
 
-      // winner line (optional, small)
-      const wTxt = `Winner: ${winnerText(m)}`;
       pdf.setFontSize(9 * scale);
-      pdf.text(wTxt, originX + S(p.x) + pad, originY + S(p.y + thisBoxH) - pad);
+      pdf.text(`Winner: ${winTxt(m)}`, originX + S(p.x) + pad, originY + S(p.y + thisBoxH) - pad);
     }
   }
 
-  // Draw connectors from round r to r+1
+  // Connectors
   for (let r = 0; r < rounds.length - 1; r++) {
     const child = pos[r];
     const parent = pos[r + 1];
 
     for (let i = 0; i < parent.length; i++) {
       const p = parent[i];
-
-      // children indices
       const c1 = child[i * 2];
       const c2 = child[i * 2 + 1];
       if (!c1 || !c2) continue;
 
-      // right-middle of each child box
       const c1x = originX + S(c1.x + c1.w);
       const c2x = originX + S(c2.x + c2.w);
       const c1y = originY + S(c1.y + c1.h / 2);
       const c2y = originY + S(c2.y + c2.h / 2);
 
-      // left-middle of parent box
       const px = originX + S(p.x);
       const py = originY + S(p.y + p.h / 2);
 
-      // Draw: child1 → horizontal to mid, child2 → horizontal to mid, vertical between them, and into parent
       const midX = px - 10 * scale;
 
-      pdf.setDrawColor(LINE);
       pdf.line(c1x, c1y, midX, c1y);
       pdf.line(c2x, c2y, midX, c2y);
-
-      // vertical join
       pdf.line(midX, c1y, midX, c2y);
-
-      // into parent
       pdf.line(midX, py, px, py);
     }
   }
@@ -420,7 +376,7 @@ async function exportTournamentToPDF(tn) {
   pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
 }
 
-// ---------- UI bits ----------
+/* ---------------- UI bits ---------------- */
 function TabButton({ id, label, tab, setTab }) {
   const active = tab === id;
   return (
@@ -467,7 +423,7 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
   const singleBye = (!!m.aId && !m.bId) || (!m.aId && !!m.bId);
   return (
     <div className="flex flex-wrap items-center gap-2 py-2 text-sm">
-      <span className="w-40 text-zinc-400">
+      <span className="w-24 text-zinc-400">
         {stageText}
         {stageText === "F" ? "" : <> • M{idx}</>}
       </span>
@@ -518,33 +474,37 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
   );
 }
 
-// ================= Component =================
+/* ---------------- Component ---------------- */
 export default function TournamentMaker() {
   const [tab, setTab] = useState("fixtures");
 
-  // Admin state (simple in-app auth)
+  // Admin
   const [isAdmin, setIsAdmin] = useState(() => localStorage.getItem("gp_is_admin") === "1");
   const [showLogin, setShowLogin] = useState(false);
   const [loginId, setLoginId] = useState("");
   const [loginPw, setLoginPw] = useState("");
 
+  // Builder state
   const [tName, setTName] = useState("");
   const [targetTournamentId, setTargetTournamentId] = useState(NEW_TOURNEY_SENTINEL);
   const [namesText, setNamesText] = useState("");
   const [seed1, setSeed1] = useState("");
   const [seed2, setSeed2] = useState("");
+  const [seed3, setSeed3] = useState(""); // NEW
+  const [seed4, setSeed4] = useState(""); // NEW
   const [builderTeams, setBuilderTeams] = useState([]);
 
   const uploadRef = useRef(null);
 
+  // Data
   const [tournaments, setTournaments] = useState(() => []);
   const [deletedTournaments, setDeletedTournaments] = useState(() => []);
 
+  // Delete modal
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deletePw, setDeletePw] = useState("");
   const [deleteTargetId, setDeleteTargetId] = useState(null);
 
-  // Load once
   useEffect(() => {
     (async () => {
       try {
@@ -564,185 +524,70 @@ export default function TournamentMaker() {
   );
 
   function loadTeamsFromText() {
-  if (!isAdmin) return alert("Admin only.");
-  const lines = namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-  if (lines.length === 0) return alert("Please enter at least one player.");
-
-  const dups = findDuplicateNamesCaseInsensitive(lines);
-  if (dups.length > 0) {
-    alert(
-      "Duplicate names found:\n\n" +
-      dups.map((n) => `• ${n}`).join("\n") +
-      "\n\nPlease remove duplicates and try again."
-    );
-    return;
-  }
-
-  // no duplicates: build teams
-  const teams = lines.map((n) => ({ id: uid(), name: n }));
-  setBuilderTeams(teams);
-
-  if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
-    setSeed1(lines[0] || "");
-    setSeed2(lines[1] || "");
-  }
-}
-
-
-  async function handlePlayersUpload(file) {
-  if (!isAdmin) return alert("Admin only.");
-  if (!file) return;
-  const ext = (file.name.split(".").pop() || "").toLowerCase();
-  let names = [];
-  if (ext === "csv") {
-    const text = await file.text();
-    names = parseCSVPlayers(text);
-  } else if (ext === "xlsx" || ext === "xls") {
-    const buf = await file.arrayBuffer();
-    names = await parseExcelPlayers(buf);
-  } else {
-    alert("Unsupported file type. Please upload .csv, .xlsx, or .xls");
-    return;
-  }
-  if (names.length === 0) return alert("Could not find a 'Players' column in the file.");
-
-  const dups = findDuplicateNamesCaseInsensitive(names);
-  if (dups.length > 0) {
-    alert(
-      "Duplicate names found in the uploaded file:\n\n" +
-      dups.map((n) => `• ${n}`).join("\n") +
-      "\n\nPlease remove duplicates and try again."
-    );
-    return;
-  }
-
-  const teams = names.map((n) => ({ id: uid(), name: n }));
-  setBuilderTeams(teams);
-
-  if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
-    setSeed1(names[0] || "");
-    setSeed2(names[1] || "");
-  }
-}
-
-
-  function generateRound1Matches(teams, seedTopName, seedBottomName) {
-    const names = teams.map((x) => x.name);
-    let size = 1;
-    while (size < names.length) size *= 2;
-
-    const slots = Array(size).fill(null);
-    slots[0] = seedTopName;
-    slots[size - 1] = seedBottomName;
-
-    const others = names.filter((n) => n !== seedTopName && n !== seedBottomName);
-    const shuffled = (() => {
-      const a = others.slice();
-      for (let i = a.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [a[i], a[j]] = [a[j], a[i]];
-      }
-      return a;
-    })();
-
-    const half = size / 2;
-    const topAvail = [];
-    const botAvail = [];
-    for (let i = 0; i < half; i++) if (i !== 0 && i !== 1) topAvail.push(i);
-    for (let i = half; i < size; i++) if (i !== size - 1 && i !== size - 2) botAvail.push(i);
-
-    const order = [];
-    const L = Math.max(topAvail.length, botAvail.length);
-    for (let i = 0; i < L; i++) {
-      if (i < topAvail.length) order.push(topAvail[i]);
-      if (i < botAvail.length) order.push(botAvail[i]);
-    }
-    order.push(1, size - 2);
-
-    let oi = 0;
-    for (const name of shuffled) {
-      while (oi < order.length && slots[order[oi]] !== null) oi++;
-      if (oi >= order.length) break;
-      slots[order[oi]] = name;
-      oi++;
-    }
-
-    const nameToId = Object.fromEntries(teams.map((tm) => [tm.name, tm.id]));
-    const matches = [];
-    for (let i = 0; i < size; i += 2) {
-      const aId = slots[i] ? nameToId[slots[i]] : null;
-      const bId = slots[i + 1] ? nameToId[slots[i + 1]] : null;
-      if (!aId && !bId) continue;
-      const bye = !aId || !bId;
-      let winnerId = null;
-      if (bye) winnerId = aId || bId || null;
-
-      matches.push({
-        id: uid(),
-        round: 1,
-        aId,
-        bId,
-        status: bye ? "BYE" : "Scheduled",
-        winnerId,
-      });
-    }
-    return matches;
-  }
-
-  function createTournament() {
     if (!isAdmin) return alert("Admin only.");
-    if (targetTournamentId !== NEW_TOURNEY_SENTINEL) {
-      const names = builderTeams.length
-        ? builderTeams.map((b) => b.name)
-        : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-      applyEntriesToTournament(targetTournamentId, names); // NOTE: still referenced, implement if needed.
+    const lines = namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const uniq = Array.from(new Set(lines));
+
+    // duplicate warning (from pasted list)
+    const dups = findDuplicateNamesCaseInsensitive(lines);
+    if (dups.length > 0) {
+      alert(
+        "Duplicate names found in the list:\n\n" +
+        dups.map((n) => `• ${n}`).join("\n") +
+        "\n\nPlease fix and try again."
+      );
       return;
     }
-     // Duplicate guard (case-insensitive)
-{
-  const names = builderTeams.map((t) => t.name);
-  const dups = findDuplicateNamesCaseInsensitive(names);
-  if (dups.length > 0) {
-    alert(
-      "Duplicate names found:\n\n" +
-      dups.map((n) => `• ${n}`).join("\n") +
-      "\n\nPlease remove duplicates and try again."
-    );
-    return;
-  }
-}
 
-    if (!tName.trim()) return alert("Please enter a Tournament Name.");
-    if (builderTeams.length < 2) return alert("Please add at least 2 entries.");
-    if (!seed1 || !seed2 || seed1 === seed2) return alert("Pick two different seeds.");
-    const nameIndex = Object.fromEntries(builderTeams.map((tm) => [tm.name, true]));
-    if (!nameIndex[seed1] || !nameIndex[seed2]) return alert("Seeds must be from the added entries.");
-
-    const matches = generateRound1Matches(builderTeams, seed1, seed2);
-    const seedTopId = builderTeamMap[seed1];
-    const seedBottomId = builderTeamMap[seed2];
-    const tourney = {
-      id: uid(),
-      name: tName.trim(),
-      createdAt: Date.now(),
-      teams: builderTeams,
-      matches,
-      status: "active",
-      seedTopId,
-      seedBottomId,
-      championId: null,
-    };
-    setTournaments((prev) => [tourney, ...prev]);
-
-    setTName("");
-    setNamesText("");
-    setSeed1("");
-    setSeed2("");
-    setBuilderTeams([]);
-    setTargetTournamentId(NEW_TOURNEY_SENTINEL);
-    setTab("fixtures");
+    const teams = uniq.map((n) => ({ id: uid(), name: n }));
+    setBuilderTeams(teams);
+    if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
+      setSeed1(uniq[0] || "");
+      setSeed2(uniq[1] || "");
+      setSeed3(uniq[2] || "");
+      setSeed4(uniq[3] || "");
+    }
   }
 
+  async function handlePlayersUpload(file) {
+    if (!isAdmin) return alert("Admin only.");
+    if (!file) return;
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+    let names = [];
+    if (ext === "csv") {
+      const text = await file.text();
+      names = parseCSVPlayers(text);
+    } else if (ext === "xlsx" || ext === "xls") {
+      const buf = await file.arrayBuffer();
+      names = await parseExcelPlayers(buf);
+    } else {
+      alert("Unsupported file type. Please upload .csv, .xlsx, or .xls");
+      return;
+    }
+    if (names.length === 0) return alert("Could not find a 'Players' column in the file.");
+
+    // duplicate warning (from file)
+    const dups = findDuplicateNamesCaseInsensitive(names);
+    if (dups.length > 0) {
+      alert(
+        "Duplicate names found in uploaded file:\n\n" +
+        dups.map((n) => `• ${n}`).join("\n") +
+        "\n\nPlease fix and re-upload."
+      );
+      return;
+    }
+
+    const teams = names.map((n) => ({ id: uid(), name: n }));
+    setBuilderTeams(teams);
+    if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
+      setSeed1(names[0] || "");
+      setSeed2(names[1] || "");
+      setSeed3(names[2] || "");
+      setSeed4(names[3] || "");
+    }
+  }
+
+  /* --------- Round helpers --------- */
   function roundCounts(tn) {
     const mp = new Map();
     for (const m of tn.matches) {
@@ -765,6 +610,82 @@ export default function TournamentMaker() {
     return valid.length > 0 && valid.every((m) => !!m.winnerId);
   }
 
+  /* --------- 2-or-4 seeding: generate R1 --------- */
+  function generateRound1Matches(teams, seeds) {
+    // seeds = { s1, s2, s3, s4 } — s3/s4 optional
+    const names = teams.map((x) => x.name);
+    let size = 1;
+    while (size < names.length) size *= 2;
+
+    const slots = Array(size).fill(null);
+
+    // Reserve positions for seeds to enforce meeting constraints:
+    // s1 → 0 ; s2 → size-1  (final only)
+    // s3 → size/2 ; s4 → size/2 - 1  (opposite halves; any top-4 only meet from SF onward)
+    const hasS3 = !!seeds.s3;
+    const hasS4 = !!seeds.s4;
+    slots[0] = seeds.s1;
+    slots[size - 1] = seeds.s2;
+    if (hasS3 && hasS4 && size >= 4) {
+      slots[size / 2] = seeds.s3;
+      slots[size / 2 - 1] = seeds.s4;
+    }
+
+    const reserved = new Set(
+      [seeds.s1, seeds.s2, hasS3 ? seeds.s3 : null, hasS4 ? seeds.s4 : null]
+        .filter(Boolean)
+        .map((n) => n.toLowerCase())
+    );
+    const others = names.filter((n) => !reserved.has(n.toLowerCase()));
+
+    // Shuffle others
+    const shuffled = (() => {
+      const a = others.slice();
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    })();
+
+    // Fill order across quarters: Q1, Q3, Q2, Q4
+    const order = [];
+    const half = size / 2;
+    const quarter = size / 4;
+    function pushRange(start, end) { for (let i = start; i < end; i++) if (slots[i] === null) order.push(i); }
+    pushRange(0, quarter);
+    pushRange(half, half + quarter);
+    pushRange(quarter, half);
+    pushRange(half + quarter, size);
+
+    let oi = 0;
+    for (const pos of order) {
+      if (oi >= shuffled.length) break;
+      slots[pos] = shuffled[oi++];
+    }
+
+    const nameToId = Object.fromEntries(teams.map((tm) => [tm.name, tm.id]));
+    const matches = [];
+    for (let i = 0; i < size; i += 2) {
+      const aId = slots[i] ? nameToId[slots[i]] : null;
+      const bId = slots[i + 1] ? nameToId[slots[i + 1]] : null;
+      if (!aId && !bId) continue;
+      const bye = !aId || !bId;
+      let winnerId = null;
+      if (bye) winnerId = aId || bId || null;
+      matches.push({
+        id: uid(),
+        round: 1,
+        aId,
+        bId,
+        status: bye ? "BYE" : "Scheduled",
+        winnerId,
+      });
+    }
+    return matches;
+  }
+
+  /* --------- CRUD on matches --------- */
   function pickWinner(tournamentId, matchId, winnerId) {
     if (!isAdmin) return alert("Admin only.");
     setTournaments((prev) =>
@@ -777,7 +698,6 @@ export default function TournamentMaker() {
       })
     );
   }
-
   function generateNextRound(tournamentId) {
     if (!isAdmin) return alert("Admin only.");
     setTournaments((prev) =>
@@ -798,7 +718,6 @@ export default function TournamentMaker() {
           const bye = !aId || !bId;
           let winnerId = null;
           if (bye) winnerId = aId || bId || null;
-
           next.push({
             id: uid(),
             round: nextRoundNo,
@@ -813,7 +732,7 @@ export default function TournamentMaker() {
     );
   }
 
-  // Delete modal & archive
+  /* --------- Delete / Restore --------- */
   function openDeleteModal(tournamentId) {
     if (!isAdmin) return alert("Admin only.");
     setDeleteTargetId(tournamentId);
@@ -847,8 +766,6 @@ export default function TournamentMaker() {
     setDeleteTargetId(null);
     setDeletePw("");
   }
-
-  // Restore & permanent delete from DELETED
   function restoreTournament(tournamentId) {
     if (!isAdmin) return alert("Admin only.");
     setDeletedTournaments((prevDeleted) => {
@@ -867,19 +784,173 @@ export default function TournamentMaker() {
     const ok = window.confirm("Permanently delete this tournament from DELETED?\nThis cannot be undone.");
     if (!ok) return;
     setDeletedTournaments((prev) => prev.filter((t) => t.id !== tournamentId));
-    // Click "Save" to persist to JSONBin.
   }
-function findDuplicateNamesCaseInsensitive(names) {
-  const seen = new Map(); // lcName -> originalName (first seen)
-  const dupSet = new Set(); // lcName duplicates
-  for (const raw of names.map((s) => String(s || "").trim()).filter(Boolean)) {
-    const lc = raw.toLowerCase();
-    if (seen.has(lc)) dupSet.add(lc);
-    else seen.set(lc, raw);
+
+  /* --------- Apply entries to existing (keep as before) --------- */
+  function applyEntriesToTournament(tournamentId, newNames) {
+    if (!isAdmin) return alert("Admin only.");
+
+    // block duplicates in the input list
+    const dups = findDuplicateNamesCaseInsensitive(newNames);
+    if (dups.length > 0) {
+      alert(
+        "Duplicate names found:\n\n" +
+        dups.map((n) => `• ${n}`).join("\n") +
+        "\n\nPlease remove duplicates and try again."
+      );
+      return;
+    }
+
+    setTournaments((prev) =>
+      prev.map((tn) => {
+        if (tn.id !== tournamentId) return tn;
+
+        const maxR = maxRound(tn);
+        if (maxR > 1) {
+          alert("Cannot add entries after the tournament has advanced beyond Round 1.");
+          return tn;
+        }
+
+        const existingNamesSet = new Set(tn.teams.map((t) => t.name.toLowerCase()));
+        const toAddNames = uniqueNames(newNames).filter((n) => !existingNamesSet.has(n.toLowerCase()));
+        if (toAddNames.length === 0) return tn;
+
+        const newTeams = toAddNames.map((n) => ({ id: uid(), name: n }));
+        const allTeams = [...tn.teams, ...newTeams];
+        const idByName = Object.fromEntries(allTeams.map((t) => [t.name, t.id]));
+
+        let matches = tn.matches.map((m) => ({ ...m }));
+
+        // fill BYEs in R1 first
+        const r1_before = matches.filter((m) => m.round === 1);
+        const byeSlots = [];
+        for (const m of r1_before) {
+          if (!m.aId) byeSlots.push({ mid: m.id, side: "a" });
+          if (!m.bId) byeSlots.push({ mid: m.id, side: "b" });
+        }
+
+        const nameQueue = [...toAddNames];
+        for (const slot of byeSlots) {
+          if (nameQueue.length === 0) break;
+          const name = nameQueue.shift();
+          const id = idByName[name];
+          const mi = matches.findIndex((x) => x.id === slot.mid);
+          if (mi >= 0) {
+            if (slot.side === "a") matches[mi].aId = id;
+            else matches[mi].bId = id;
+            if (matches[mi].aId && matches[mi].bId) {
+              matches[mi].status = "Scheduled";
+              matches[mi].winnerId = null;
+            }
+          }
+        }
+
+        // if still more names, append new R1 matches
+        while (nameQueue.length > 0) {
+          const aName = nameQueue.shift();
+          const bName = nameQueue.shift() || null;
+          const aId = idByName[aName];
+          const bId = bName ? idByName[bName] : null;
+          const bye = !aId || !bId;
+          let winnerId = null;
+          if (bye) winnerId = aId || bId || null;
+
+          matches.push({
+            id: uid(),
+            round: 1,
+            aId,
+            bId,
+            status: bye ? "BYE" : "Scheduled",
+            winnerId,
+          });
+        }
+
+        const updated = { ...tn, teams: allTeams, matches };
+        setNamesText("");
+        setBuilderTeams([]);
+        return updated;
+      })
+    );
   }
-  // return duplicates using their first-seen casing for readability
-  return Array.from(dupSet).map((lc) => seen.get(lc));
-}
+
+  /* --------- Create tournament (with duplicate guard & 2|4 seeding) --------- */
+  function createTournament() {
+    if (!isAdmin) return alert("Admin only.");
+    if (targetTournamentId !== NEW_TOURNEY_SENTINEL) {
+      const names = builderTeams.length
+        ? builderTeams.map((b) => b.name)
+        : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      applyEntriesToTournament(targetTournamentId, names);
+      return;
+    }
+
+    if (!tName.trim()) return alert("Please enter a Tournament Name.");
+    if (builderTeams.length < 2) return alert("Please add at least 2 entries.");
+
+    // duplicate guard on builderTeams
+    const names = builderTeams.map((t) => t.name);
+    const dups = findDuplicateNamesCaseInsensitive(names);
+    if (dups.length > 0) {
+      alert(
+        "Duplicate names found:\n\n" +
+        dups.map((n) => `• ${n}`).join("\n") +
+        "\n\nPlease remove duplicates and try again."
+      );
+      return;
+    }
+
+    // seeding guard: 2 or 4 seeds; all distinct and present
+    const picked = [seed1, seed2, seed3, seed4].filter(Boolean);
+    if (picked.length < 2) return alert("Select at least Seed 1 and Seed 2.");
+    if (!(picked.length === 2 || picked.length === 4)) {
+      return alert("You can select either 2 seeds or 4 seeds (not 3).");
+    }
+    const setPicked = new Set(picked.map((s) => s.trim().toLowerCase()));
+    if (setPicked.size !== picked.length) {
+      return alert("Seeds must be different players.");
+    }
+    const nameIndex = Object.fromEntries(builderTeams.map((tm) => [tm.name.toLowerCase(), true]));
+    for (const s of picked) {
+      if (!nameIndex[s.toLowerCase()]) return alert(`Seed not in entries: ${s}`);
+    }
+
+    const matches = generateRound1Matches(builderTeams, {
+      s1: seed1,
+      s2: seed2,
+      s3: picked.length === 4 ? seed3 : null,
+      s4: picked.length === 4 ? seed4 : null,
+    });
+
+    const seedTopId = builderTeamMap[seed1];
+    const seedBottomId = builderTeamMap[seed2];
+    const seed3Id = picked.length === 4 ? builderTeamMap[seed3] : null;
+    const seed4Id = picked.length === 4 ? builderTeamMap[seed4] : null;
+
+    const tourney = {
+      id: uid(),
+      name: tName.trim(),
+      createdAt: Date.now(),
+      teams: builderTeams,
+      matches,
+      status: "active",
+      seedTopId,
+      seedBottomId,
+      seed3Id,
+      seed4Id,
+      championId: null,
+    };
+    setTournaments((prev) => [tourney, ...prev]);
+
+    setTName("");
+    setNamesText("");
+    setSeed1("");
+    setSeed2("");
+    setSeed3("");
+    setSeed4("");
+    setBuilderTeams([]);
+    setTargetTournamentId(NEW_TOURNEY_SENTINEL);
+    setTab("fixtures");
+  }
 
   // Save
   const saveAll = async () => {
@@ -904,6 +975,9 @@ function findDuplicateNamesCaseInsensitive(names) {
 .field { background: rgba(255,255,255,0.05); color: #fff; }
 `;
 
+  const activeTournaments = tournaments.filter((tn) => tn.status === "active");
+  const completedTournaments = tournaments.filter((tn) => tn.status === "completed");
+
   return (
     <div className="p-4 text-white min-h-screen pageBg" style={{ position: "relative", zIndex: 1 }}>
       <style>{gpStyles}</style>
@@ -922,7 +996,7 @@ function findDuplicateNamesCaseInsensitive(names) {
           {isAdmin && <TabButton id="schedule" label="SCHEDULE" tab={tab} setTab={setTab} />}
           <TabButton id="fixtures" label="FIXTURES" tab={tab} setTab={setTab} />
           <TabButton id="standings" label="STANDINGS" tab={tab} setTab={setTab} />
-          <TabButton id="winners" label="W INNERS" tab={tab} setTab={setTab} />
+          <TabButton id="winners" label="WINNERS" tab={tab} setTab={setTab} />
           {isAdmin && <TabButton id="deleted" label="DELETED" tab={tab} setTab={setTab} />}
         </div>
         <div className="flex gap-2 items-center">
@@ -936,17 +1010,21 @@ function findDuplicateNamesCaseInsensitive(names) {
               Admin Login
             </button>
           ) : (
-            <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => {
-              setIsAdmin(false);
-              localStorage.removeItem("gp_is_admin");
-              if (tab === "schedule" || tab === "deleted") setTab("fixtures");
-            }}>
+            <button
+              className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
+              onClick={() => {
+                setIsAdmin(false);
+                localStorage.removeItem("gp_is_admin");
+                if (tab === "schedule" || tab === "deleted") setTab("fixtures");
+              }}
+            >
               Logout
             </button>
           )}
         </div>
       </div>
 
+      {/* Admin Login */}
       {showLogin && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="w-[90vw] max-w-sm border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
@@ -981,6 +1059,7 @@ function findDuplicateNamesCaseInsensitive(names) {
         </div>
       )}
 
+      {/* Delete confirm */}
       {showDeleteModal && isAdmin && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
           <div className="w-[90vw] max-w-md border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
@@ -993,33 +1072,14 @@ function findDuplicateNamesCaseInsensitive(names) {
               <input type="password" className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={deletePw} onChange={(e) => setDeletePw(e.target.value)} placeholder="password" />
             </div>
             <div className="flex gap-2 justify-end">
-              <button className="px-3 py-2 border rounded border-zinc-400 text-zinc-200 hover:bg-zinc-200 hover:text-black" onClick={() => {
-                setShowDeleteModal(false);
-                setDeleteTargetId(null);
-                setDeletePw("");
-              }}>Cancel</button>
-              <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => {
-                if (deletePw !== ADMIN_PASSWORD) return alert("Incorrect password.");
-                const ok = window.confirm("Are you sure you want to delete this tournament?\nIt will be moved to the DELETED tab (not permanently erased).");
-                if (!ok) return;
-                setTournaments((prev) => {
-                  const idx = prev.findIndex((t) => t.id === deleteTargetId);
-                  if (idx === -1) return prev;
-                  const t = prev[idx];
-                  const remaining = [...prev.slice(0, idx), ...prev.slice(idx + 1)];
-                  const archived = { ...t, deletedAt: Date.now() };
-                  setDeletedTournaments((old) => [archived, ...old]);
-                  return remaining;
-                });
-                setShowDeleteModal(false);
-                setDeleteTargetId(null);
-                setDeletePw("");
-              }}>Delete</button>
+              <button className="px-3 py-2 border rounded border-zinc-400 text-zinc-200 hover:bg-zinc-200 hover:text-black" onClick={cancelDelete}>Cancel</button>
+              <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={confirmDelete}>Delete</button>
             </div>
           </div>
         </div>
       )}
 
+      {/* SCHEDULE */}
       {tab === "schedule" && (isAdmin ? (
         <section className="grid md:grid-cols-2 gap-4">
           <div className="border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
@@ -1097,7 +1157,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
             </div>
 
             {targetTournamentId === NEW_TOURNEY_SENTINEL && builderTeams.length > 0 && (
-              <div className="my-3 flex gap-4 items-center">
+              <div className="my-3 grid sm:grid-cols-2 gap-4 items-center">
                 <label className="text-xs">
                   Seed 1
                   <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed1} onChange={(e) => setSeed1(e.target.value)}>
@@ -1116,6 +1176,27 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                     ))}
                   </select>
                 </label>
+                <label className="text-xs">
+                  Seed 3 (optional)
+                  <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed3} onChange={(e) => setSeed3(e.target.value)}>
+                    <option value="">—</option>
+                    {builderTeams.map((tm) => (
+                      <option key={tm.id} value={tm.name}>{tm.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs">
+                  Seed 4 (optional)
+                  <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed4} onChange={(e) => setSeed4(e.target.value)}>
+                    <option value="">—</option>
+                    {builderTeams.map((tm) => (
+                      <option key={tm.id} value={tm.name}>{tm.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <p className="sm:col-span-2 text-[11px] text-white/70">
+                  Seeding rules: Seed 1 & 2 opposite ends (final only). Seeds 3 & 4 in opposite halves (final only). Top-4 meet no earlier than SF.
+                </p>
               </div>
             )}
 
@@ -1141,15 +1222,16 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       ))}
 
+      {/* FIXTURES */}
       {tab === "fixtures" && (
         <section>
-          {tournaments.filter(t => t.status === "active").length === 0 && (
+          {activeTournaments.length === 0 && (
             <p className="text-white/80 text-sm">
               No active tournaments. {isAdmin ? <>Create one from <b>SCHEDULE</b>.</> : <>Ask an admin to create one.</>}
             </p>
           )}
 
-          {tournaments.filter(t => t.status === "active").map((tn) => {
+          {activeTournaments.map((tn) => {
             const mr = maxRound(tn);
             const counts = roundCounts(tn);
             const canNext = canGenerateNext(tn);
@@ -1218,6 +1300,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
+      {/* STANDINGS */}
       {tab === "standings" && (
         <section>
           {tournaments.length === 0 && (
@@ -1243,23 +1326,22 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
 
             return (
               <Collapsible
-  key={tn.id}
-  title={tn.name}
-  subtitle={subtitle}
-  right={
-    isAdmin ? (
-      <button
-        className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
-        onClick={() => openDeleteModal(tn.id)}
-        title="Delete tournament"
-      >
-        Delete
-      </button>
-    ) : null
-  }
-  defaultOpen={false}
->
-
+                key={tn.id}
+                title={tn.name}
+                subtitle={subtitle}
+                right={
+                  isAdmin ? (
+                    <button
+                      className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
+                      onClick={() => openDeleteModal(tn.id)}
+                      title="Delete tournament"
+                    >
+                      Delete
+                    </button>
+                  ) : null
+                }
+                defaultOpen={false}
+              >
                 {ordered.map(([round, arr]) => (
                   <div key={round} className="mb-3">
                     <h3 className="font-semibold mb-1">{stageShort(arr.length)}</h3>
@@ -1292,12 +1374,13 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
+      {/* WINNERS */}
       {tab === "winners" && (
         <section>
-          {tournaments.filter(t => t.status === "completed").length === 0 && (
+          {completedTournaments.length === 0 && (
             <p className="text-white/80 text-sm">No completed tournaments yet. Finish one in <b>FIXTURES</b>.</p>
           )}
-          {tournaments.filter(t => t.status === "completed").map((tn) => {
+          {completedTournaments.map((tn) => {
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
             const byRound = new Map();
             for (const m of tn.matches) {
@@ -1314,23 +1397,22 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
             const championName = tn.championId ? teamMap[tn.championId] || "TBD" : "TBD";
             return (
               <Collapsible
-  key={tn.id}
-  title={tn.name}
-  subtitle={`Champion: ${championName}`}
-  right={
-    isAdmin ? (
-      <button
-        className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
-        onClick={() => openDeleteModal(tn.id)}
-        title="Delete tournament"
-      >
-        Delete
-      </button>
-    ) : null
-  }
-  defaultOpen={false}
->
-
+                key={tn.id}
+                title={tn.name}
+                subtitle={`Champion: ${championName}`}
+                right={
+                  isAdmin ? (
+                    <button
+                      className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
+                      onClick={() => openDeleteModal(tn.id)}
+                      title="Delete tournament"
+                    >
+                      Delete
+                    </button>
+                  ) : null
+                }
+                defaultOpen={false}
+              >
                 {ordered.length === 0 ? (
                   <p className="text-white/80 text-sm">No SF/F recorded yet.</p>
                 ) : (
@@ -1366,6 +1448,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
+      {/* DELETED */}
       {tab === "deleted" && (isAdmin ? (
         <section>
           {deletedTournaments.length === 0 ? (
@@ -1451,7 +1534,6 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
     if (!IS_DEV) return;
     const eq = (name, got, exp) =>
       console.log(`[TEST] ${name}:`, Array.isArray(exp) ? JSON.stringify(got) === JSON.stringify(exp) : got === exp ? "PASS" : "FAIL");
-    // eq("normalizeHeader", normalizeHeader(" Players "), "players");
   } catch (e) {
     console.warn("Dev tests error:", e);
   }

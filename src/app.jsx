@@ -376,6 +376,143 @@ async function exportTournamentToPDF(tn) {
   pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
 }
 
+/* ---------------- Dark themed custom select ---------------- */
+function DarkSelect({
+  value,
+  onChange,
+  options,
+  placeholder = "Select…",
+  disabled = false,
+  className = "",
+  style = {},
+  itemClassName = "",
+}) {
+  const [open, setOpen] = React.useState(false);
+  const btnRef = React.useRef(null);
+  const listRef = React.useRef(null);
+  const [focusIdx, setFocusIdx] = React.useState(-1);
+
+  const current = options.find(o => o.value === value) || null;
+
+  React.useEffect(() => {
+    function onDocClick(e) {
+      if (!btnRef.current) return;
+      if (btnRef.current.contains(e.target)) return;
+      if (listRef.current && listRef.current.contains(e.target)) return;
+      setOpen(false);
+      setFocusIdx(-1);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  function openMenu() {
+    if (disabled) return;
+    setOpen(true);
+    const idx = Math.max(0, options.findIndex(o => o.value === value));
+    setFocusIdx(idx);
+  }
+
+  function choose(idx) {
+    const opt = options[idx];
+    if (!opt) return;
+    onChange?.(opt.value);
+    setOpen(false);
+    setFocusIdx(-1);
+  }
+
+  function onKeyDown(e) {
+    if (!open) {
+      if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openMenu();
+      }
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setOpen(false);
+      setFocusIdx(-1);
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setFocusIdx(i => Math.min(options.length - 1, (i < 0 ? 0 : i + 1)));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setFocusIdx(i => Math.max(0, (i < 0 ? 0 : i - 1)));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (focusIdx >= 0) choose(focusIdx);
+    } else if (e.key === "Tab") {
+      setOpen(false);
+      setFocusIdx(-1);
+    }
+  }
+
+  return (
+    <div className={`relative ${className}`} style={{ minWidth: 160, ...style }}>
+      <button
+        ref={btnRef}
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => (open ? setOpen(false) : openMenu())}
+        onKeyDown={onKeyDown}
+        className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl border field focus:border-white outline-none transition
+          ${disabled ? "opacity-50 cursor-not-allowed" : "hover:bg-white/5 cursor-pointer"}`}
+        style={{ borderColor: TM_BLUE }}
+      >
+        <span className={`truncate ${current ? "" : "text-white/60"}`}>
+          {current ? (current.label ?? String(current.value)) : placeholder}
+        </span>
+        <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0" fill="currentColor" aria-hidden="true">
+          <path d="M7 10l5 5 5-5z" />
+        </svg>
+      </button>
+
+      {open && (
+        <ul
+          ref={listRef}
+          role="listbox"
+          tabIndex={-1}
+          className="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-xl border glass shadow-xl"
+          style={{ borderColor: TM_BLUE, background: "rgba(20,22,35,0.98)", backdropFilter: "blur(8px)" }}
+          onKeyDown={onKeyDown}
+        >
+          {options.length === 0 ? (
+            <li className="px-3 py-2 text-sm text-white/60">No options</li>
+          ) : options.map((o, idx) => {
+            const isSelected = value === o.value;
+            const isFocused = focusIdx === idx;
+            return (
+              <li
+                key={String(o.value) + idx}
+                role="option"
+                aria-selected={isSelected}
+                className={`px-3 py-2 text-sm text-white flex items-center justify-between
+                  ${isFocused ? "bg-white/10" : "bg-transparent"}
+                  hover:bg-white/10 cursor-pointer ${itemClassName}`}
+                onMouseEnter={() => setFocusIdx(idx)}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => choose(idx)}
+              >
+                <span className="truncate">{o.label ?? String(o.value)}</span>
+                {isSelected && (
+                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor" aria-hidden="true">
+                    <path d="M9 16.2l-3.5-3.6L4 14.1 9 19l11-11-1.5-1.4z" />
+                  </svg>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- UI bits ---------------- */
 function TabButton({ id, label, tab, setTab }) {
   const active = tab === id;
@@ -459,16 +596,16 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
           {m.winnerId ? "Advanced" : "Auto-advance"}
         </button>
       ) : (
-        <select
-          className="field border rounded p-1 focus:border-white outline-none"
-          style={{ borderColor: TM_BLUE }}
+        <DarkSelect
+          className="min-w-[200px]"
           value={m.winnerId || ""}
-          onChange={(e) => onPickWinner(m.id, e.target.value || null)}
-        >
-          <option value="">Winner — pick</option>
-          {m.aId && <option value={m.aId}>{aName}</option>}
-          {m.bId && <option value={m.bId}>{bName}</option>}
-        </select>
+          onChange={(val) => onPickWinner(m.id, val || null)}
+          options={[
+            { value: "", label: "Winner — pick" },
+            ...(m.aId ? [{ value: m.aId, label: aName }] : []),
+            ...(m.bId ? [{ value: m.bId, label: bName }] : []),
+          ]}
+        />
       )}
     </div>
   );
@@ -1087,12 +1224,15 @@ export default function TournamentMaker() {
 
             <label className="text-xs block mb-3">
               Tournament
-              <select className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={targetTournamentId} onChange={(e) => setTargetTournamentId(e.target.value)}>
-                <option value={NEW_TOURNEY_SENTINEL}>➕ Create New Tournament</option>
-                {tournaments.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
+              <DarkSelect
+                className="mt-1"
+                value={targetTournamentId}
+                onChange={setTargetTournamentId}
+                options={[
+                  { value: NEW_TOURNEY_SENTINEL, label: "➕ Create New Tournament" },
+                  ...tournaments.map(t => ({ value: t.id, label: t.name })),
+                ]}
+              />
             </label>
 
             {targetTournamentId === NEW_TOURNEY_SENTINEL && (
@@ -1160,39 +1300,39 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
               <div className="my-3 grid sm:grid-cols-2 gap-4 items-center">
                 <label className="text-xs">
                   Seed 1
-                  <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed1} onChange={(e) => setSeed1(e.target.value)}>
-                    <option value="">—</option>
-                    {builderTeams.map((tm) => (
-                      <option key={tm.id} value={tm.name}>{tm.name}</option>
-                    ))}
-                  </select>
+                  <DarkSelect
+                    className="mt-1"
+                    value={seed1}
+                    onChange={setSeed1}
+                    options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]}
+                  />
                 </label>
                 <label className="text-xs">
                   Seed 2
-                  <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed2} onChange={(e) => setSeed2(e.target.value)}>
-                    <option value="">—</option>
-                    {builderTeams.map((tm) => (
-                      <option key={tm.id} value={tm.name}>{tm.name}</option>
-                    ))}
-                  </select>
+                  <DarkSelect
+                    className="mt-1"
+                    value={seed2}
+                    onChange={setSeed2}
+                    options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]}
+                  />
                 </label>
                 <label className="text-xs">
                   Seed 3 (optional)
-                  <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed3} onChange={(e) => setSeed3(e.target.value)}>
-                    <option value="">—</option>
-                    {builderTeams.map((tm) => (
-                      <option key={tm.id} value={tm.name}>{tm.name}</option>
-                    ))}
-                  </select>
+                  <DarkSelect
+                    className="mt-1"
+                    value={seed3}
+                    onChange={setSeed3}
+                    options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]}
+                  />
                 </label>
                 <label className="text-xs">
                   Seed 4 (optional)
-                  <select className="field border rounded p-1 ml-1" style={{ borderColor: TM_BLUE }} value={seed4} onChange={(e) => setSeed4(e.target.value)}>
-                    <option value="">—</option>
-                    {builderTeams.map((tm) => (
-                      <option key={tm.id} value={tm.name}>{tm.name}</option>
-                    ))}
-                  </select>
+                  <DarkSelect
+                    className="mt-1"
+                    value={seed4}
+                    onChange={setSeed4}
+                    options={[{ value: "", label: "—" }, ...builderTeams.map(tm => ({ value: tm.name, label: tm.name }))]}
+                  />
                 </label>
                 <p className="sm:col-span-2 text-[11px] text-white/70">
                   Seeding rules: Seed 1 & 2 opposite ends (final only). Seeds 3 & 4 in opposite halves (final only). Top-4 meet no earlier than SF.

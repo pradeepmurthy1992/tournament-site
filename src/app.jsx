@@ -261,12 +261,17 @@ async function exportTournamentToPDF(tn) {
   // Quick lookup for team names
   const teamMap = Object.fromEntries((tn.teams || []).map((t) => [t.id, t.name]));
 
+  // Layout constants
+  const boxW = 210;
+  const boxH = 54;
+  const colGap = 44;
+  const vGap = 28; // uniform vertical gap for all rounds
+
+  // PDF setup
   const pdf = new jsPDFCtor({ orientation: "landscape", unit: "pt", format: "a4" });
   const pageW = pdf.internal.pageSize.getWidth();
   const pageH = pdf.internal.pageSize.getHeight();
   const margin = 36;
-
-  // Colors / styles (white background, black text/lines)
   const BG = "#ffffff";
   const FG = "#000000";
 
@@ -278,186 +283,119 @@ async function exportTournamentToPDF(tn) {
   pdf.setFontSize(18);
   pdf.text(`${tn.name} — Fixtures`, margin, margin + 6);
 
-  // Layout “virtual space” then scale-to-fit
-  const colGap = 44;
-  const boxW = 210;
-  const boxH0 = 54;        // taller to fit two lines nicely
-  const vGap0 = 16;
-
-  const colWidths = rounds.map((_, rIdx) => boxW * Math.max(0.75, 1 - rIdx * 0.08));
-  const roundHeights = rounds.map((_, rIdx) => boxH0 + rIdx * 4);
-  const roundVGaps = rounds.map((_, rIdx) => vGap0 * Math.pow(2, rIdx));
-
-  // Column x
-  const colX = [];
-  let totalW = 0;
-  for (let r = 0; r < rounds.length; r++) {
-    if (r === 0) {
-      colX[r] = 0;
-      totalW += colWidths[r];
-    } else {
-      colX[r] = colX[r - 1] + colWidths[r - 1] + colGap;
-      totalW += colGap + colWidths[r];
-    }
-  }
-
-  const r1Count = rounds[0].matches.length;
-  const bodyH = r1Count * roundHeights[0] + (r1Count - 1) * roundVGaps[0];
+  // Compute total width & scale factor
+  const totalCols = rounds.length;
+  const totalW = totalCols * boxW + (totalCols - 1) * colGap;
+  const totalMatches = rounds[0].matches.length;
+  const totalH = totalMatches * boxH + (totalMatches - 1) * vGap;
   const maxW = pageW - margin * 2;
-  const maxH = pageH - (margin * 2 + 18 + 10);
-  const scale = Math.min(1, maxW / totalW, maxH / bodyH);
+  const maxH = pageH - (margin * 2 + 30);
+  const scale = Math.min(1, maxW / totalW, maxH / totalH);
 
+  // Col positions
+  const colX = Array.from({ length: totalCols }, (_, i) => i * (boxW + colGap));
+  // Y offset at which the first box starts
   const originX = margin;
   const originY = margin + 24;
-  const S = (n) => n * scale;
 
-  // Cache positions: pos[r][i] = {x,y,w,h}
-  const pos = rounds.map((r, rIdx) => {
-    const matches = r.matches;
-    const thisBoxH = roundHeights[rIdx];
-    const thisVGap = roundVGaps[rIdx];
-
-    const arr = [];
-    if (rIdx === 0) {
-      let y = 0;
-      for (let i = 0; i < matches.length; i++) {
-        arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH });
-        y += thisBoxH + thisVGap;
-      }
-    } else {
-      const prevBoxH = roundHeights[rIdx - 1];
-      const prevVGap = roundVGaps[rIdx - 1];
-      const childBlockH = prevBoxH + prevVGap;
-      const myBlockH = childBlockH * 2 - prevVGap;
-      let y = (myBlockH - thisBoxH) / 2;
-      for (let i = 0; i < matches.length; i++) {
-        arr.push({ x: colX[rIdx], y, w: colWidths[rIdx], h: thisBoxH });
-        y += myBlockH;
-      }
-    }
-    return arr;
-  });
-
-  // Thin, uniform border everywhere (boxes + connectors)
-  const BOX_LINE_W = Math.max(0.6, 0.6 * scale); // minimal & uniform
-  const CONN_LINE_W = BOX_LINE_W;
-
-  /* --- utilities --- */
-  const getChildWinnersOrPlaceholders = (rIdx, iIdx) => {
-    const childRound = rounds[rIdx - 1];
-    const left = childRound?.matches?.[iIdx * 2];
-    const right = childRound?.matches?.[iIdx * 2 + 1];
-    const leftNo = left ? matchNoById.get(left.id) : null;
-    const rightNo = right ? matchNoById.get(right.id) : null;
-
-    const leftWinner = left?.winnerId ? (teamMap[left.winnerId] || "TBD") : null;
-    const rightWinner = right?.winnerId ? (teamMap[right.winnerId] || "TBD") : null;
-
-    if (leftWinner && rightWinner) {
-      return { type: "names", a: leftWinner, aId: left.winnerId, b: rightWinner, bId: right.winnerId };
-    }
-    // placeholder single line stays as requested
-    return { type: "placeholder", text: `[Winner of M${leftNo ?? "?"} Vs M${rightNo ?? "?"}]` };
-  };
-
-  const getRound1Names = (m) => {
-    const a = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
-    const b = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
-    return { type: "names", a, aId: m.aId, b, bId: m.bId };
-  };
-
-  // Draw everything
+  // Cache Y positions for all matches by round
+  const matchPosY = {};
   for (let r = 0; r < rounds.length; r++) {
-    const matches = rounds[r].matches;
-
-    for (let i = 0; i < matches.length; i++) {
-      const m = matches[i];
-      const p = pos[r][i];
-
-      // Box
-      pdf.setDrawColor(0);
-      pdf.setLineWidth(BOX_LINE_W);
-      pdf.rect(originX + S(p.x), originY + S(p.y), S(p.w), S(p.h), "S");
-
-      const padX = 6 * scale;
-      const padTop = 6 * scale;
-
-      // Lines Y positions (with small gaps)
-      const titleY = originY + S(p.y) + padTop + 10 * scale;     // "Match M#"
-      const gapAfterTitle = 3 * scale;                            // small gap after "Match M#"
-      const line1Y = titleY + gapAfterTitle + 11 * scale;         // first participant line
-      const gapBetweenLines = 3 * scale;                          // small gap between lines
-      const line2Y = line1Y + gapBetweenLines + 11 * scale;       // second participant line
-
-      // Label: "Match M#"
-      pdf.setFont("helvetica", "bold");
-      pdf.setFontSize(10 * scale);
-      pdf.setTextColor(FG);
-      pdf.text(`Match M${matchNoById.get(m.id)}`, originX + S(p.x) + padX, titleY);
-
-      const info = r === 0 ? getRound1Names(m) : getChildWinnersOrPlaceholders(r, i);
-
-      if (info.type === "placeholder") {
-        // Single line centered-ish left (you can fully center if wanted)
-        pdf.setFont("helvetica", "normal");
-        pdf.setFontSize(11 * scale);
-        pdf.setTextColor(FG);
-        pdf.text(info.text, originX + S(p.x) + padX, line1Y);
-        // nothing on second line for placeholders
-      } else {
-        const winnerId = m.winnerId || null;
-
-        const leftIsWinner = winnerId && winnerId === info.aId;
-        const rightIsWinner = winnerId && winnerId === info.bId;
-
-        // Line 1: "<Name A>  VS"
-        const line1Parts = [
-          ...buildParts(info.a || "TBD", { bold: !!leftIsWinner, strike: !!(winnerId && !leftIsWinner && info.a && info.a !== "BYE/TBD") }),
-          { text: "  VS", bold: false, strike: false },
-        ];
-        drawRichLine(pdf, originX + S(p.x) + padX, line1Y, line1Parts, { size: 11 * scale, color: FG });
-
-        // Line 2: "Name B"
-        const line2Parts = [
-          ...buildParts(info.b || "TBD", { bold: !!rightIsWinner, strike: !!(winnerId && !rightIsWinner && info.b && info.b !== "BYE/TBD") })
-        ];
-        drawRichLine(pdf, originX + S(p.x) + padX, line2Y, line2Parts, { size: 11 * scale, color: FG });
-      }
+    matchPosY[r] = [];
+    const numMatches = rounds[r].matches.length;
+    const spaceH = (boxH + vGap) * numMatches - vGap;
+    let offsetY = (totalH - spaceH) / 2; // center vertically
+    for (let m = 0; m < numMatches; m++) {
+      matchPosY[r][m] = offsetY + m * (boxH + vGap);
     }
   }
 
-  // Connectors (thin & consistent)
-  for (let r = 0; r < rounds.length - 1; r++) {
-    const child = pos[r];
-    const parent = pos[r + 1];
-
-    for (let i = 0; i < parent.length; i++) {
-      const p = parent[i];
-      const c1 = child[i * 2];
-      const c2 = child[i * 2 + 1];
-      if (!c1 || !c2) continue;
-
-      const c1x = originX + S(c1.x + c1.w);
-      const c2x = originX + S(c2.x + c2.w);
-      const c1y = originY + S(c1.y + c1.h / 2);
-      const c2y = originY + S(c2.y + c2.h / 2);
-
-      const px = originX + S(p.x);
-      const py = originY + S(p.y + p.h / 2);
-
-      const midX = px - 10 * scale;
-
+  // Draw boxes and content
+  for (let r = 0; r < rounds.length; r++) {
+    const matches = rounds[r].matches;
+    for (let i = 0; i < matches.length; i++) {
+      const m = matches[i];
+      const x = originX + scale * colX[r];
+      const y = originY + scale * matchPosY[r][i];
+      const w = scale * boxW;
+      const h = scale * boxH;
       pdf.setDrawColor(0);
-      pdf.setLineWidth(CONN_LINE_W);
-      pdf.line(c1x, c1y, midX, c1y);
-      pdf.line(c2x, c2y, midX, c2y);
-      pdf.line(midX, c1y, midX, c2y);
-      pdf.line(midX, py, px, py);
+      pdf.setLineWidth(Math.max(0.6, 0.6 * scale));
+      pdf.rect(x, y, w, h, "S");
+
+      // Centering logic for text
+      const titleFontSize = 10 * scale;
+      const playerFontSize = 11 * scale;
+
+      // Title (match number)
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(titleFontSize);
+      pdf.setTextColor(FG);
+      pdf.text(
+        `Match M${matchNoById.get(m.id)}`,
+        x + 8 * scale,
+        y + 13 * scale
+      );
+
+      // Players/Placeholder, centered vertically in box
+      let line1 = "", line2 = "";
+      if (r === 0) {
+        // First round: show actual players
+        line1 = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
+        line2 = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
+      } else {
+        // Later rounds: placeholder or advanced
+        const prevCount = rounds[r - 1].matches.length;
+        const c1Idx = i * 2, c2Idx = i * 2 + 1;
+        const left = rounds[r - 1].matches[c1Idx];
+        const right = rounds[r - 1].matches[c2Idx];
+        const leftNo = left ? matchNoById.get(left.id) : "?";
+        const rightNo = right ? matchNoById.get(right.id) : "?";
+        line1 = `[Winner of M${leftNo}]`;
+        line2 = `[Winner of M${rightNo}]`;
+      }
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(playerFontSize);
+      pdf.setTextColor(FG);
+
+      // Vertically center lines within the box
+      const line1Y = y + h / 2 - 3.5 * scale;
+      const line2Y = y + h / 2 + 8.5 * scale;
+      pdf.text(line1 + "  VS", x + 8 * scale, line1Y);
+      pdf.text(line2, x + 8 * scale, line2Y);
+    }
+  }
+
+  // Draw connectors - adjusted for new box/y logic
+  for (let r = 0; r < rounds.length - 1; r++) {
+    const parents = rounds[r + 1].matches;
+    for (let i = 0; i < parents.length; i++) {
+      // Connect to both child boxes (c1, c2)
+      const px = originX + scale * colX[r + 1];
+      const py = originY + scale * matchPosY[r + 1][i] + 0.5 * boxH * scale;
+
+      const c1Idx = i * 2, c2Idx = i * 2 + 1;
+      const c1x = originX + scale * colX[r];
+      const c2x = c1x;
+      const c1y = originY + scale * matchPosY[r][c1Idx] + 0.5 * boxH * scale;
+      const c2y = originY + scale * matchPosY[r][c2Idx] + 0.5 * boxH * scale;
+
+      // Horizontal lines from children to junction
+      const junctionX = px - 14 * scale;
+      pdf.setDrawColor(0);
+      pdf.setLineWidth(Math.max(0.6, 0.6 * scale));
+      pdf.line(c1x + boxW * scale, c1y, junctionX, c1y);
+      pdf.line(c2x + boxW * scale, c2y, junctionX, c2y);
+      // Vertical line between those two children
+      pdf.line(junctionX, c1y, junctionX, c2y);
+      // Horizontal line from junction to parent
+      pdf.line(junctionX, py, px, py);
     }
   }
 
   pdf.save(`${tn.name.replace(/[^\w\-]+/g, "_")}_fixtures.pdf`);
 }
+
 
 
 

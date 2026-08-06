@@ -1,6 +1,20 @@
 // ====== Persistence glue (backend-agnostic) ======
 import React, { useEffect, useMemo, useState, useRef } from "react";
-import { loadStoreOnce, saveStore /*, subscribeStore*/ } from "./db";
+import { loadStoreOnce, saveStore, adminLogin } from "./db";
+import { getSport, listSelectableSports } from "./sports/registry";
+import {
+  splitIntoGroups,
+  buildGroupMatches,
+  computeStandings,
+  isGroupComplete,
+  topNTeamIds,
+} from "./sports/groupStage";
+import {
+  isValidGame,
+  matchWinnerSideFromGames,
+  isMatchComplete as isGamesMatchComplete,
+  pointsDiffFromGames,
+} from "./sports/badminton";
 
 /* Using CDN globals (index.html):
    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -10,17 +24,14 @@ import { loadStoreOnce, saveStore /*, subscribeStore*/ } from "./db";
 /* global XLSX, html2canvas, jspdf */
 
 /**
- * Tournament Maker — Multiple Concurrent Tournaments (TT & Badminton)
+ * FixtureForge — Multi-Sport Tournament Maker
  * Tabs: SCHEDULE (admin only), FIXTURES, STANDINGS, WINNERS, DELETED (admin only)
  */
 
 const TM_BLUE = "#0f4aa1";
 const NEW_TOURNEY_SENTINEL = "__NEW__";
+const ADMIN_SESSION_KEY = "ff_admin_session"; // { token, name, exp }
 const uid = () => Math.random().toString(36).slice(2, 9);
-
-// ⚠️ Change before sharing
-const ADMIN_USERNAME = "admin";
-const ADMIN_PASSWORD = "gameport123";
 
 /* ---------------- Helpers ---------------- */
 function normalizeHeader(h) {
@@ -87,10 +98,27 @@ function statusText(m) {
   return "TBD";
 }
 function winnerText(teamMap, m) { return m.winnerId ? (teamMap[m.winnerId] || "TBD") : "TBD"; }
-function groupMatchesByRound(tn) {
+function groupMatchesByRound(matches) {
   const byRound = new Map();
-  for (const m of tn.matches) { if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
+  for (const m of matches) { if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
   return Array.from(byRound.entries()).sort((a, b) => a[0] - b[0]).map(([round, matches]) => ({ round, matches }));
+}
+function readAdminSession() {
+  try {
+    const raw = localStorage.getItem(ADMIN_SESSION_KEY);
+    if (!raw) return null;
+    const session = JSON.parse(raw);
+    if (!session?.token || !session?.exp || Date.now() > session.exp) {
+      localStorage.removeItem(ADMIN_SESSION_KEY);
+      return null;
+    }
+    return session;
+  } catch {
+    return null;
+  }
+}
+function knockoutMatches(tn) {
+  return (tn.matches || []).filter((m) => (m.stage || "knockout") === "knockout");
 }
 function stageShort(count) {
   if (!Number.isFinite(count) || count <= 0) return "R?";
@@ -109,7 +137,7 @@ function exportTournamentToExcel(tn) {
   try {
     const wb = XLSX.utils.book_new();
     const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
-    const grouped = groupMatchesByRound(tn);
+    const grouped = groupMatchesByRound(knockoutMatches(tn));
     if (grouped.length === 0) return alert("No matches to export.");
     for (const { matches } of grouped) {
       const data = [["Match #", "Player A", "Player B", "Winner", "Status"]];
@@ -127,7 +155,7 @@ function exportTournamentToExcel(tn) {
 /* ---------------- Vector PDF bracket ---------------- */
 function buildProjectedRounds(tn) {
   const byRound = new Map();
-  for (const m of (tn.matches || [])) { if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
+  for (const m of knockoutMatches(tn)) { if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
   for (const [r, arr] of byRound) byRound.set(r, arr.slice());
 
   const teamCount = (tn.teams || []).length;
@@ -595,11 +623,57 @@ function Collapsible({ title, subtitle, right, children, defaultOpen = false }) 
     </div>
   );
 }
-function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
+// Best-of-N game-score entry for "games"-model sports (badminton, table tennis).
+function GameScoreEntry({ games, gameConfig, onChange, disabled }) {
+  const list = games && games.length ? games : [{ a: "", b: "" }];
+  const bestOf = gameConfig.bestOf;
+  const winnerSide = matchWinnerSideFromGames(list, bestOf);
+  const decidedGames = list.filter((g) => g.a !== "" && g.b !== "" && isValidGame({ a: Number(g.a), b: Number(g.b) }, gameConfig)).length;
+
+  function setGame(i, side, value) {
+    const next = list.map((g, gi) => (gi === i ? { ...g, [side]: value } : g));
+    onChange(next.map((g) => ({ a: g.a === "" ? "" : Number(g.a), b: g.b === "" ? "" : Number(g.b) })));
+  }
+  function addGame() { onChange([...list, { a: "", b: "" }]); }
+  function removeGame(i) { onChange(list.filter((_, gi) => gi !== i)); }
+
+  return (
+    <div className="flex flex-col gap-1 w-full sm:w-auto">
+      {list.map((g, i) => {
+        const valid = g.a === "" || g.b === "" ? true : isValidGame({ a: Number(g.a), b: Number(g.b) }, gameConfig);
+        return (
+          <div key={i} className="flex items-center gap-1">
+            <span className="text-[10px] text-white/50 w-6">G{i + 1}</span>
+            <input type="number" min={0} disabled={disabled} value={g.a}
+              onChange={(e) => setGame(i, "a", e.target.value)}
+              className="w-14 field border rounded p-1 text-center" style={{ borderColor: TM_BLUE }} />
+            <span className="text-white/50">–</span>
+            <input type="number" min={0} disabled={disabled} value={g.b}
+              onChange={(e) => setGame(i, "b", e.target.value)}
+              className="w-14 field border rounded p-1 text-center" style={{ borderColor: TM_BLUE }} />
+            {!disabled && list.length > 1 && (
+              <button type="button" onClick={() => removeGame(i)} className="text-white/40 hover:text-red-300 text-xs px-1">✕</button>
+            )}
+            {!valid && <span className="text-[10px] text-red-300">invalid score</span>}
+          </div>
+        );
+      })}
+      {!disabled && list.length < bestOf && (
+        <button type="button" onClick={addGame} className="text-[11px] text-left text-white/60 hover:text-white underline">+ add game</button>
+      )}
+      <span className="text-[10px] text-white/50">
+        {winnerSide ? "Match decided" : `Best of ${bestOf} • ${decidedGames} game(s) recorded`}
+      </span>
+    </div>
+  );
+}
+
+function MatchRow({ idx, m, teamMap, onPickWinner, onUpdateGames, sport, stageText, canEdit }) {
   const aName = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
   const bName = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
   const bothEmpty = !m.aId && !m.bId;
   const singleBye = (!!m.aId && !m.bId) || (!m.aId && !!m.bId);
+  const usesGames = sport?.matchModel === "games" && !bothEmpty && !singleBye;
   return (
     <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-1 sm:gap-2 py-2 text-sm">
       <span className="text-zinc-400 sm:w-24">
@@ -609,7 +683,26 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
       {!bothEmpty && !singleBye && <span className="hidden sm:inline">vs</span>}
       <div className="flex-1">{bName}</div>
 
-      {!canEdit ? (
+      {usesGames ? (
+        canEdit ? (
+          <GameScoreEntry
+            games={m.games || []}
+            gameConfig={sport.gameConfig}
+            onChange={(games) => onUpdateGames(m.id, games)}
+          />
+        ) : (
+          <span className="text-xs">
+            {(m.games || []).length === 0 ? (
+              <span className="text-white/60">Not started</span>
+            ) : (
+              <>
+                {(m.games || []).map((g, i) => `${g.a}-${g.b}`).join(", ")}
+                {m.winnerId && <> — Winner: <b>{teamMap[m.winnerId] || "TBD"}</b></>}
+              </>
+            )}
+          </span>
+        )
+      ) : !canEdit ? (
         <span className="text-xs">
           {bothEmpty ? (
             <span className="text-white/60">(empty pairing)</span>
@@ -649,15 +742,51 @@ function MatchRow({ idx, m, teamMap, onPickWinner, stageText, canEdit }) {
   );
 }
 
+// Group-stage standings table: Played / Won / Lost / Points / Diff.
+function GroupStandingsTable({ group, standings, teamMap }) {
+  return (
+    <div className="mb-4">
+      <h4 className="font-semibold mb-1 text-sm">{group.name}</h4>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs sm:text-sm border-collapse">
+          <thead>
+            <tr className="text-left text-white/60 border-b" style={{ borderColor: "rgba(255,255,255,0.15)" }}>
+              <th className="py-1 pr-2">Player</th>
+              <th className="py-1 px-2 text-center">P</th>
+              <th className="py-1 px-2 text-center">W</th>
+              <th className="py-1 px-2 text-center">L</th>
+              <th className="py-1 px-2 text-center">Pts</th>
+              <th className="py-1 px-2 text-center">Diff</th>
+            </tr>
+          </thead>
+          <tbody>
+            {standings.map((row, i) => (
+              <tr key={row.teamId} className="border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                <td className="py-1 pr-2">{i < 2 && <span className="text-emerald-300">●</span>} {teamMap[row.teamId] || "Unknown"}</td>
+                <td className="py-1 px-2 text-center">{row.played}</td>
+                <td className="py-1 px-2 text-center">{row.won}</td>
+                <td className="py-1 px-2 text-center">{row.lost}</td>
+                <td className="py-1 px-2 text-center font-semibold">{row.points}</td>
+                <td className="py-1 px-2 text-center">{row.diff > 0 ? `+${row.diff}` : row.diff}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Component ---------------- */
 export default function TournamentMaker() {
   const [tab, setTab] = useState("fixtures");
 
-  // Admin
-  const [isAdmin, setIsAdmin] = useState(() => localStorage.getItem("gp_is_admin") === "1");
+  // Admin — session = { token, name, exp } | null
+  const [adminSession, setAdminSession] = useState(() => readAdminSession());
+  const isAdmin = !!adminSession;
   const [showLogin, setShowLogin] = useState(false);
-  const [loginId, setLoginId] = useState("");
-  const [loginPw, setLoginPw] = useState("");
+  const [loginCode, setLoginCode] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
 
   // Builder state
   const [tName, setTName] = useState("");
@@ -668,27 +797,38 @@ export default function TournamentMaker() {
   const [seed3, setSeed3] = useState("");
   const [seed4, setSeed4] = useState("");
   const [builderTeams, setBuilderTeams] = useState([]);
+  const [sportId, setSportId] = useState("generic");
+  const [format, setFormat] = useState("knockout"); // "knockout" | "groups"
+  const [numGroups, setNumGroups] = useState(2);
+  const [advancePerGroup, setAdvancePerGroup] = useState(2);
 
   const uploadRef = useRef(null);
 
   // Data
   const [tournaments, setTournaments] = useState(() => []);
   const [deletedTournaments, setDeletedTournaments] = useState(() => []);
+  const [loadState, setLoadState] = useState("loading"); // "loading" | "ready" | "error"
+  const [loadError, setLoadError] = useState("");
 
   // Delete modal
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [deletePw, setDeletePw] = useState("");
   const [deleteTargetId, setDeleteTargetId] = useState(null);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const data = await loadStoreOnce();
-        setTournaments(Array.isArray(data.tournaments) ? data.tournaments : []);
-        setDeletedTournaments(Array.isArray(data.deleted) ? data.deleted : []);
-      } catch (e) { console.warn("Load error:", e); }
-    })();
-  }, []);
+  async function refreshFromStore() {
+    setLoadState("loading");
+    try {
+      const data = await loadStoreOnce();
+      setTournaments(Array.isArray(data.tournaments) ? data.tournaments : []);
+      setDeletedTournaments(Array.isArray(data.deleted) ? data.deleted : []);
+      setLoadState("ready");
+    } catch (e) {
+      console.warn("Load error:", e);
+      setLoadError(e?.message || "Failed to load tournaments.");
+      setLoadState("error");
+    }
+  }
+
+  useEffect(() => { refreshFromStore(); }, []);
 
   const builderTeamMap = useMemo(
     () => Object.fromEntries(builderTeams.map((tm) => [tm.name, tm.id])),
@@ -733,10 +873,20 @@ export default function TournamentMaker() {
     }
   }
 
-  function roundCounts(tn) { const mp = new Map(); for (const m of tn.matches) { if (!(m.aId || m.bId)) continue; mp.set(m.round, (mp.get(m.round) || 0) + 1); } return mp; }
-  function maxRound(tn) { return tn.matches.length ? Math.max(...tn.matches.map((m) => m.round)) : 0; }
-  function currentRoundMatches(tn) { const mr = maxRound(tn); return tn.matches.filter((m) => m.round === mr); }
+  function roundCounts(tn) { const mp = new Map(); for (const m of knockoutMatches(tn)) { if (!(m.aId || m.bId)) continue; mp.set(m.round, (mp.get(m.round) || 0) + 1); } return mp; }
+  function maxRound(tn) { const ko = knockoutMatches(tn); return ko.length ? Math.max(...ko.map((m) => m.round)) : 0; }
+  function currentRoundMatches(tn) { const mr = maxRound(tn); return knockoutMatches(tn).filter((m) => m.round === mr); }
   function canGenerateNext(tn) { const cur = currentRoundMatches(tn); if (!cur.length) return false; const valid = cur.filter((m) => m.aId || m.bId); return valid.length > 0 && valid.every((m) => !!m.winnerId); }
+
+  // Has the group stage finished (all group matches decided) and knockout not yet generated?
+  function canGenerateKnockoutFromGroups(tn) {
+    if (tn.format !== "groups" || tn.groupStage?.complete) return false;
+    const groupMatches = (tn.matches || []).filter((m) => m.stage === "group");
+    if (!groupMatches.length) return false;
+    return (tn.groups || []).every((g) =>
+      isGroupComplete(groupMatches.filter((m) => m.groupId === g.id))
+    );
+  }
 
   function generateRound1Matches(teams, seeds) {
     const names = teams.map((x) => x.name);
@@ -762,9 +912,42 @@ export default function TournamentMaker() {
       const bId = slots[i + 1] ? nameToId[slots[i + 1]] : null;
       if (!aId && !bId) continue;
       const bye = !aId || !bId;
-      matches.push({ id: uid(), round: 1, aId, bId, status: bye ? "BYE" : "Scheduled", winnerId: bye ? (aId || bId || null) : null });
+      matches.push({ id: uid(), stage: "knockout", round: 1, aId, bId, status: bye ? "BYE" : "Scheduled", winnerId: bye ? (aId || bId || null) : null, games: [] });
     }
     return matches;
+  }
+
+  // Seeds the top-N finishers of each group into a fresh knockout bracket,
+  // reusing the existing seeding engine. Advancing teams are interleaved
+  // across groups (all rank-1s, then all rank-2s, ...) so same-group teams
+  // are less likely to meet in the very first round.
+  function generateKnockoutFromGroups(tournamentId) {
+    if (!isAdmin) return alert("Admin only.");
+    setTournaments((prev) => prev.map((tn) => {
+      if (tn.id !== tournamentId) return tn;
+      if (!canGenerateKnockoutFromGroups(tn)) return tn;
+      const sport = getSport(tn.sport);
+      const teamMap = Object.fromEntries(tn.teams.map((t) => [t.id, t.name]));
+      const groupMatches = tn.matches.filter((m) => m.stage === "group");
+      const advancingByGroup = tn.groups.map((g) => {
+        const gm = groupMatches.filter((m) => m.groupId === g.id);
+        const standings = computeStandings(g.teamIds, gm, {
+          pointsRule: sport.pointsRule,
+          getDiff: sport.matchModel === "games" ? (m) => pointsDiffFromGames(m.games) : undefined,
+        });
+        return topNTeamIds(standings, tn.groupStage.advancePerGroup);
+      });
+      const advancing = [];
+      const maxLen = Math.max(...advancingByGroup.map((a) => a.length), 0);
+      for (let rank = 0; rank < maxLen; rank++) {
+        for (const grp of advancingByGroup) if (grp[rank]) advancing.push(grp[rank]);
+      }
+      const teams = advancing.map((id) => ({ id, name: teamMap[id] }));
+      if (teams.length < 2) { alert("Not enough teams advanced to form a knockout bracket."); return tn; }
+      const s1 = teams[0]?.name, s2 = teams[1]?.name;
+      const matches = generateRound1Matches(teams, { s1, s2, s3: null, s4: null });
+      return { ...tn, matches: [...tn.matches, ...matches], groupStage: { ...tn.groupStage, complete: true } };
+    }));
   }
 
   function pickWinner(tournamentId, matchId, winnerId) {
@@ -772,6 +955,24 @@ export default function TournamentMaker() {
     setTournaments((prev) => prev.map((tn) => {
       if (tn.id !== tournamentId) return tn;
       const matches = tn.matches.map((m) => (m.id === matchId ? { ...m, winnerId, status: winnerId ? "Final" : m.status } : m));
+      return { ...tn, matches };
+    }));
+  }
+
+  // Updates the game-by-game score for a "games"-model match (badminton) and
+  // derives the winner once enough games have been won.
+  function updateMatchGames(tournamentId, matchId, games) {
+    if (!isAdmin) return alert("Admin only.");
+    setTournaments((prev) => prev.map((tn) => {
+      if (tn.id !== tournamentId) return tn;
+      const sport = getSport(tn.sport);
+      const bestOf = sport.gameConfig?.bestOf || 3;
+      const matches = tn.matches.map((m) => {
+        if (m.id !== matchId) return m;
+        const side = matchWinnerSideFromGames(games, bestOf);
+        const winnerId = side === "a" ? m.aId : side === "b" ? m.bId : null;
+        return { ...m, games, winnerId, status: winnerId ? "Final" : "Scheduled" };
+      });
       return { ...tn, matches };
     }));
   }
@@ -788,18 +989,15 @@ export default function TournamentMaker() {
         const aId = winners[i] || null, bId = winners[i + 1] || null;
         if (!aId && !bId) continue;
         const bye = !aId || !bId;
-        next.push({ id: uid(), round: nextRoundNo, aId, bId, status: bye ? "BYE" : "Scheduled", winnerId: bye ? (aId || bId || null) : null });
+        next.push({ id: uid(), stage: "knockout", round: nextRoundNo, aId, bId, status: bye ? "BYE" : "Scheduled", winnerId: bye ? (aId || bId || null) : null, games: [] });
       }
       return { ...tn, matches: [...tn.matches, ...next] };
     }));
   }
 
-  function openDeleteModal(tournamentId) { if (!isAdmin) return alert("Admin only."); setDeleteTargetId(tournamentId); setDeletePw(""); setShowDeleteModal(true); }
+  function openDeleteModal(tournamentId) { if (!isAdmin) return alert("Admin only."); setDeleteTargetId(tournamentId); setShowDeleteModal(true); }
   function confirmDelete() {
     if (!isAdmin) return;
-    if (deletePw !== ADMIN_PASSWORD) return alert("Incorrect password.");
-    const ok = window.confirm?.("Are you sure you want to delete this tournament?\nIt will be moved to the DELETED tab (not permanently erased).");
-    if (!ok) return;
     setTournaments((prev) => {
       const idx = prev.findIndex((t) => t.id === deleteTargetId); if (idx === -1) return prev;
       const t = prev[idx]; const remaining = [...prev.slice(0, idx), ...prev.slice(idx + 1)];
@@ -807,9 +1005,9 @@ export default function TournamentMaker() {
       setDeletedTournaments((old) => [archived, ...old]);
       return remaining;
     });
-    setShowDeleteModal(false); setDeleteTargetId(null); setDeletePw("");
+    setShowDeleteModal(false); setDeleteTargetId(null);
   }
-  function cancelDelete() { setShowDeleteModal(false); setDeleteTargetId(null); setDeletePw(""); }
+  function cancelDelete() { setShowDeleteModal(false); setDeleteTargetId(null); }
   function restoreTournament(tournamentId) {
     if (!isAdmin) return alert("Admin only.");
     setDeletedTournaments((prevDeleted) => {
@@ -882,6 +1080,25 @@ export default function TournamentMaker() {
     const dups = findDuplicateNamesCaseInsensitive(names);
     if (dups.length > 0) return alert("Duplicate names found:\n\n" + dups.map((n) => `• ${n}`).join("\n"));
 
+    if (format === "groups") {
+      if (builderTeams.length < numGroups * 2) return alert(`Need at least ${numGroups * 2} entries for ${numGroups} groups.`);
+      const groupIds = Array.from({ length: numGroups }, () => uid());
+      const buckets = splitIntoGroups(builderTeams.map((t) => t.id), numGroups);
+      const groups = groupIds.map((id, i) => ({ id, name: `Group ${String.fromCharCode(65 + i)}`, teamIds: buckets[i] }));
+      const matches = groups.flatMap((g) => buildGroupMatches(g.id, g.teamIds));
+      const advance = Math.min(advancePerGroup, Math.min(...buckets.map((b) => b.length)));
+
+      const tourney = {
+        id: uid(), name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active",
+        sport: sportId, format: "groups", groups, groupStage: { advancePerGroup: advance, complete: false },
+        championId: null,
+      };
+      setTournaments((prev) => [tourney, ...prev]);
+      setTName(""); setNamesText(""); setBuilderTeams([]); setSportId("generic"); setFormat("knockout");
+      setTargetTournamentId(NEW_TOURNEY_SENTINEL); setTab("fixtures");
+      return;
+    }
+
     const picked = [seed1, seed2, seed3, seed4].filter(Boolean);
     if (picked.length < 2) return alert("Select at least Seed 1 and Seed 2.");
     if (!(picked.length === 2 || picked.length === 4)) return alert("You can select either 2 seeds or 4 seeds (not 3).");
@@ -894,18 +1111,50 @@ export default function TournamentMaker() {
     const seedTopId = builderTeamMap[seed1], seedBottomId = builderTeamMap[seed2];
     const seed3Id = picked.length === 4 ? builderTeamMap[seed3] : null, seed4Id = picked.length === 4 ? builderTeamMap[seed4] : null;
 
-    const tourney = { id: uid(), name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active", seedTopId, seedBottomId, seed3Id, seed4Id, championId: null };
+    const tourney = { id: uid(), name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active", sport: sportId, format: "knockout", seedTopId, seedBottomId, seed3Id, seed4Id, championId: null };
     setTournaments((prev) => [tourney, ...prev]);
 
-    setTName(""); setNamesText(""); setSeed1(""); setSeed2(""); setSeed3(""); setSeed4(""); setBuilderTeams([]);
+    setTName(""); setNamesText(""); setSeed1(""); setSeed2(""); setSeed3(""); setSeed4(""); setBuilderTeams([]); setSportId("generic"); setFormat("knockout");
     setTargetTournamentId(NEW_TOURNEY_SENTINEL); setTab("fixtures");
   }
 
   const saveAll = async () => {
     if (!isAdmin) return alert("Admin only.");
-    try { await saveStore({ tournaments, deleted: deletedTournaments }); alert("Saved."); }
-    catch (e) { console.error(e); alert("Save failed. Check console."); }
+    try {
+      await saveStore({ tournaments, deleted: deletedTournaments }, adminSession.token);
+      alert("Saved.");
+    } catch (e) {
+      console.error(e);
+      if (String(e.message || "").includes("401")) {
+        setAdminSession(null); localStorage.removeItem(ADMIN_SESSION_KEY);
+        alert("Your admin session expired. Please log in again and retry.");
+      } else {
+        alert(`Save failed: ${e.message || "check console"}`);
+      }
+    }
   };
+
+  async function handleAdminLogin(e) {
+    e.preventDefault();
+    setLoginBusy(true);
+    try {
+      const { token, name } = await adminLogin(loginCode.trim());
+      const exp = Date.now() + 12 * 60 * 60 * 1000;
+      const session = { token, name, exp };
+      setAdminSession(session);
+      localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(session));
+      setShowLogin(false); setLoginCode("");
+    } catch (err) {
+      alert(err.message || "Invalid access code");
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+  function handleAdminLogout() {
+    setAdminSession(null);
+    localStorage.removeItem(ADMIN_SESSION_KEY);
+    if (tab === "schedule" || tab === "deleted") setTab("fixtures");
+  }
 
   const gpStyles = `
 @keyframes diagPan { 0% { background-position: 0 0; } 100% { background-position: 400px 400px; } }
@@ -928,8 +1177,8 @@ export default function TournamentMaker() {
       <section className="relative rounded-2xl overflow-hidden border mb-3 sm:mb-4 min-h-[18vh] sm:min-h-[25vh] flex items-center" style={{ borderColor: TM_BLUE }}>
         <div className="relative p-4 sm:p-6 md:p-8 w-full gpGroup">
           <h1 className="text-4xl sm:text-5xl md:text-7xl lg:text-8xl font-extrabold tracking-widest text-center select-none">
-            <span className="gp3d" style={{ color: "#ffffff" }}>GAME</span>
-            <span className="gp3d ml-2" style={{ color: "#ffffff" }}>PORT</span>
+            <span className="gp3d" style={{ color: "#ffffff" }}>FIXTURE</span>
+            <span className="gp3d ml-2" style={{ color: "#ffffff" }}>FORGE</span>
           </h1>
         </div>
       </section>
@@ -949,11 +1198,26 @@ export default function TournamentMaker() {
           {!isAdmin ? (
             <button className="px-3 py-2 border rounded hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => setShowLogin(true)}>Admin Login</button>
           ) : (
-            <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black"
-              onClick={() => { setIsAdmin(false); localStorage.removeItem("gp_is_admin"); if (tab === "schedule" || tab === "deleted") setTab("fixtures"); }}>Logout</button>
+            <>
+              <span className="text-xs text-white/70">Logged in as: <b>{adminSession.name}</b></span>
+              <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={handleAdminLogout}>Logout</button>
+            </>
           )}
         </div>
       </div>
+
+      {loadState === "loading" && (
+        <div className="mb-3 sm:mb-4 border rounded-2xl p-3 text-sm glass flex items-center gap-2" style={{ borderColor: TM_BLUE }}>
+          <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          Loading tournaments…
+        </div>
+      )}
+      {loadState === "error" && (
+        <div className="mb-3 sm:mb-4 border border-red-400 rounded-2xl p-3 text-sm glass flex flex-wrap items-center justify-between gap-2">
+          <span className="text-red-300">Couldn't load tournaments: {loadError}</span>
+          <button className="px-3 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={refreshFromStore}>Retry</button>
+        </div>
+      )}
 
       {/* Admin Login */}
       {showLogin && (
@@ -963,22 +1227,15 @@ export default function TournamentMaker() {
               <h3 className="font-semibold">Admin Login</h3>
               <button className="w-6 h-6 border border-white rounded text-xs hover:bg-white hover:text-black" onClick={() => setShowLogin(false)}>×</button>
             </div>
-            <form onSubmit={(e) => {
-              e.preventDefault();
-              if (loginId === ADMIN_USERNAME && loginPw === ADMIN_PASSWORD) {
-                setIsAdmin(true); localStorage.setItem("gp_is_admin", "1"); setShowLogin(false); setLoginId(""); setLoginPw("");
-              } else { alert("Invalid credentials"); }
-            }} className="space-y-3">
+            <form onSubmit={handleAdminLogin} className="space-y-3">
               <div>
-                <label className="text-xs">Admin ID</label>
-                <input className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="enter admin id" />
+                <label className="text-xs">Access Code</label>
+                <input className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={loginCode} onChange={(e) => setLoginCode(e.target.value)} placeholder="enter your access code" autoFocus />
               </div>
-              <div>
-                <label className="text-xs">Password</label>
-                <input type="password" className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={loginPw} onChange={(e) => setLoginPw(e.target.value)} placeholder="password" />
-              </div>
-              <button type="submit" className="w-full px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black">Login</button>
-              <p className="text-xs text-white/60">(Change admin ID & password in code before publishing.)</p>
+              <button type="submit" disabled={loginBusy} className="w-full px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black disabled:opacity-50">
+                {loginBusy ? "Checking…" : "Login"}
+              </button>
+              <p className="text-xs text-white/60">Don't have a code? Contact the site owner to get admin access.</p>
             </form>
           </div>
         </div>
@@ -989,11 +1246,7 @@ export default function TournamentMaker() {
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-3">
           <div className="w-full max-w-md border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
             <h3 className="font-semibold mb-2">Confirm Delete</h3>
-            <p className="text-sm text-white/80 mb-3">Re-enter your admin <b>password</b> to delete. It will be moved to the <b>DELETED</b> tab.</p>
-            <div className="mb-3">
-              <label className="text-xs">Admin Password</label>
-              <input type="password" className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={deletePw} onChange={(e) => setDeletePw(e.target.value)} placeholder="password" />
-            </div>
+            <p className="text-sm text-white/80 mb-3">Are you sure? It will be moved to the <b>DELETED</b> tab (not permanently erased).</p>
             <div className="flex flex-wrap gap-2 justify-end">
               <button className="px-3 py-2 border rounded border-zinc-400 text-zinc-200 hover:bg-zinc-200 hover:text-black" onClick={cancelDelete}>Cancel</button>
               <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={confirmDelete}>Delete</button>
@@ -1020,10 +1273,45 @@ export default function TournamentMaker() {
             </label>
 
             {targetTournamentId === NEW_TOURNEY_SENTINEL && (
-              <label className="text-xs block mb-3">
-                Tournament Name
-                <input className="mt-1 w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={tName} onChange={(e) => setTName(e.target.value)} placeholder="e.g., Office TT Cup — Aug 2025" />
-              </label>
+              <>
+                <label className="text-xs block mb-3">
+                  Tournament Name
+                  <input className="mt-1 w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={tName} onChange={(e) => setTName(e.target.value)} placeholder="e.g., Office TT Cup — Aug 2025" />
+                </label>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                  <label className="text-xs">
+                    Sport
+                    <div className="mt-1">
+                      <DarkSelect value={sportId} onChange={setSportId}
+                        options={listSelectableSports().filter(s => s.implemented).map(s => ({ value: s.id, label: s.label }))} />
+                    </div>
+                  </label>
+                  <label className="text-xs">
+                    Format
+                    <div className="mt-1">
+                      <DarkSelect value={format} onChange={setFormat}
+                        options={[
+                          { value: "knockout", label: "Knockout only" },
+                          ...(getSport(sportId).supportsGroups ? [{ value: "groups", label: "Groups + Knockout" }] : []),
+                        ]} />
+                    </div>
+                  </label>
+                </div>
+
+                {format === "groups" && (
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <label className="text-xs">
+                      Number of groups
+                      <input type="number" min={2} max={8} className="mt-1 w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={numGroups} onChange={(e) => setNumGroups(Math.max(2, Number(e.target.value) || 2))} />
+                    </label>
+                    <label className="text-xs">
+                      Advance per group
+                      <input type="number" min={1} max={4} className="mt-1 w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={advancePerGroup} onChange={(e) => setAdvancePerGroup(Math.max(1, Number(e.target.value) || 1))} />
+                    </label>
+                  </div>
+                )}
+              </>
             )}
 
             <label className="text-xs block mb-2">Players (one per line)</label>
@@ -1072,7 +1360,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
               </button>
             </div>
 
-            {targetTournamentId === NEW_TOURNEY_SENTINEL && builderTeams.length > 0 && (
+            {targetTournamentId === NEW_TOURNEY_SENTINEL && format === "knockout" && builderTeams.length > 0 && (
               <div className="my-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <label className="text-xs">
                   Seed 1
@@ -1144,12 +1432,16 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
             const counts = roundCounts(tn);
             const canNext = canGenerateNext(tn);
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
+            const sport = getSport(tn.sport);
+            const isGroupFmt = tn.format === "groups";
+            const ko = knockoutMatches(tn);
+            const canKO = isGroupFmt && canGenerateKnockoutFromGroups(tn);
 
             return (
               <Collapsible
                 key={tn.id}
                 title={tn.name}
-                subtitle={`Active • ${tn.teams.length} players`}
+                subtitle={`Active • ${sport.label} • ${tn.teams.length} players`}
                 right={
                   <>
                     {isAdmin && (
@@ -1159,8 +1451,14 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                     )}
                     <button className="px-2 py-1 rounded border hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => exportTournamentToPDF(tn)}>Export PDF</button>
                     <button className="px-2 py-1 rounded border hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => exportTournamentToExcel(tn)}>Export Excel</button>
-                    <span className="text-xs text-white/70">Current: {stageShort(counts.get(mr) || 0)}</span>
-                    {isAdmin && (
+                    {ko.length > 0 && <span className="text-xs text-white/70">Current: {stageShort(counts.get(mr) || 0)}</span>}
+                    {isAdmin && canKO && (
+                      <button className="px-3 py-2 rounded-xl border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
+                        onClick={() => generateKnockoutFromGroups(tn.id)}>
+                        Generate Knockout Bracket
+                      </button>
+                    )}
+                    {isAdmin && ko.length > 0 && (
                       <button
                         className={`px-3 py-2 rounded-xl border transition ${canNext ? "border-white hover:bg-white hover:text-black" : "border-zinc-700 text-zinc-500 cursor-not-allowed"}`}
                         disabled={!canNext}
@@ -1173,19 +1471,52 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 }
                 defaultOpen={true}
               >
-                <div className="divide-y" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
-                  {tn.matches.map((m, i) => (
-                    <MatchRow
-                      key={m.id}
-                      idx={i + 1}
-                      m={m}
-                      teamMap={teamMap}
-                      stageText={stageShort(roundCounts(tn).get(m.round) || 0)}
-                      onPickWinner={(mid, wid) => (isAdmin ? pickWinner(tn.id, mid, wid) : null)}
-                      canEdit={isAdmin}
-                    />
-                  ))}
-                </div>
+                {isGroupFmt && (
+                  <div className="mb-4">
+                    {tn.groups.map((g) => {
+                      const groupMatches = tn.matches.filter((m) => m.groupId === g.id);
+                      return (
+                        <div key={g.id} className="mb-4">
+                          <h4 className="font-semibold text-sm mb-1">{g.name}</h4>
+                          <div className="divide-y" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
+                            {groupMatches.map((m, i) => (
+                              <MatchRow
+                                key={m.id}
+                                idx={i + 1}
+                                m={m}
+                                teamMap={teamMap}
+                                sport={sport}
+                                stageText="Grp"
+                                onPickWinner={(mid, wid) => (isAdmin ? pickWinner(tn.id, mid, wid) : null)}
+                                onUpdateGames={(mid, games) => (isAdmin ? updateMatchGames(tn.id, mid, games) : null)}
+                                canEdit={isAdmin}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {ko.length > 0 && (
+                  <div className="divide-y" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
+                    {isGroupFmt && <h4 className="font-semibold text-sm mb-1 pt-2">Knockout</h4>}
+                    {ko.map((m, i) => (
+                      <MatchRow
+                        key={m.id}
+                        idx={i + 1}
+                        m={m}
+                        teamMap={teamMap}
+                        sport={sport}
+                        stageText={stageShort(roundCounts(tn).get(m.round) || 0)}
+                        onPickWinner={(mid, wid) => (isAdmin ? pickWinner(tn.id, mid, wid) : null)}
+                        onUpdateGames={(mid, games) => (isAdmin ? updateMatchGames(tn.id, mid, games) : null)}
+                        canEdit={isAdmin}
+                      />
+                    ))}
+                  </div>
+                )}
               </Collapsible>
             );
           })}
@@ -1203,14 +1534,19 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
 
           {tournaments.map((tn) => {
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
+            const sport = getSport(tn.sport);
+            const isGroupFmt = tn.format === "groups";
+            const ko = knockoutMatches(tn);
             const byRound = new Map();
-            for (const m of tn.matches) { if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
+            for (const m of ko) { if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
             const ordered = Array.from(byRound.entries()).sort((a, b) => a[0] - b[0]);
-            const mr = tn.matches.length ? Math.max(...tn.matches.map((m) => m.round)) : 1;
+            const mr = ko.length ? Math.max(...ko.map((m) => m.round)) : 1;
             const currentCount = (ordered.find(([r]) => r === mr)?.[1].length) || 0;
             const subtitle = tn.status === "completed"
               ? `Completed • Champion: ${tn.championId ? teamMap[tn.championId] || "TBD" : "TBD"}`
-              : `Active • Current: ${stageShort(currentCount)}`;
+              : ko.length
+                ? `Active • Current: ${stageShort(currentCount)}`
+                : `Active • Group stage`;
 
             return (
               <Collapsible
@@ -1224,6 +1560,14 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 ) : null}
                 defaultOpen={false}
               >
+                {isGroupFmt && tn.groups.map((g) => {
+                  const groupMatches = tn.matches.filter((m) => m.groupId === g.id);
+                  const standings = computeStandings(g.teamIds, groupMatches, {
+                    pointsRule: sport.pointsRule,
+                    getDiff: sport.matchModel === "games" ? (m) => pointsDiffFromGames(m.games) : undefined,
+                  });
+                  return <GroupStandingsTable key={g.id} group={g} standings={standings} teamMap={teamMap} />;
+                })}
                 {ordered.map(([round, arr]) => (
                   <div key={round} className="mb-3">
                     <h3 className="font-semibold mb-1">{stageShort(arr.length)}</h3>
@@ -1259,7 +1603,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
           {completedTournaments.map((tn) => {
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
             const byRound = new Map();
-            for (const m of tn.matches) { if (!m.winnerId) continue; if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
+            for (const m of knockoutMatches(tn)) { if (!m.winnerId) continue; if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
             const ordered = Array.from(byRound.entries()).sort((a, b) => a[0] - b[0]).filter(([_, arr]) => {
               const code = stageShort(arr.length); return code === "F" || code === "SF";
             });

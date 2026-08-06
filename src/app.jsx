@@ -779,15 +779,15 @@ function GroupCard({ group, playerCount, played, total, selected, onClick }) {
     <button
       type="button"
       onClick={onClick}
-      className={`text-left rounded-2xl border p-3 transition ${selected ? "glass" : "hover:bg-white/5"}`}
+      className={`text-left rounded-xl border p-2 transition ${selected ? "glass" : "hover:bg-white/5"}`}
       style={{ borderColor: selected ? ACCENT : "rgba(255,255,255,0.15)", boxShadow: selected ? `0 0 0 1px ${ACCENT}` : "none" }}
     >
-      <div className="flex items-center justify-between mb-1">
-        <span className="font-semibold text-sm">{group.name}</span>
-        {complete && <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase" style={{ background: ACCENT_SECONDARY, color: "#08201c" }}>Done</span>}
+      <div className="flex items-center justify-between gap-1 mb-0.5">
+        <span className="font-semibold text-xs truncate">{group.name}</span>
+        {complete && <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded-full font-semibold uppercase" style={{ background: ACCENT_SECONDARY, color: "#08201c" }}>Done</span>}
       </div>
-      <div className="text-[11px] text-white/60 mb-2">{playerCount} players • {played}/{total} matches played</div>
-      <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.1)" }}>
+      <div className="text-[10px] text-white/60 mb-1.5 truncate">{playerCount}p • {played}/{total} played</div>
+      <div className="h-1 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.1)" }}>
         <div className="h-full rounded-full" style={{ width: `${pct}%`, background: complete ? ACCENT_SECONDARY : ACCENT }} />
       </div>
     </button>
@@ -1546,8 +1546,8 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                   const activeGroup = tn.groups.find((g) => g.id === activeGroupId) || tn.groups[0];
                   const activeGroupMatches = activeGroup ? tn.matches.filter((m) => m.groupId === activeGroup.id) : [];
                   return (
-                    <div className="mb-4">
-                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">
+                    <div className="mb-4 max-w-xl">
+                      <div className="grid gap-1.5 mb-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(108px, 1fr))" }}>
                         {tn.groups.map((g) => {
                           const groupMatches = tn.matches.filter((m) => m.groupId === g.id);
                           const played = groupMatches.filter((m) => m.winnerId).length;

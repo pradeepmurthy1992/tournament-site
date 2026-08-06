@@ -769,6 +769,31 @@ function GroupStandingsTable({ group, standings, teamMap }) {
   );
 }
 
+// Clickable group-summary card: name, player count, match progress. Used
+// as the drill-down entry point into a group's fixtures (see FIXTURES tab)
+// instead of dumping every group's matches into one long flat list.
+function GroupCard({ group, playerCount, played, total, selected, onClick }) {
+  const pct = total > 0 ? Math.round((played / total) * 100) : 0;
+  const complete = total > 0 && played === total;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`text-left rounded-2xl border p-3 transition ${selected ? "glass" : "hover:bg-white/5"}`}
+      style={{ borderColor: selected ? ACCENT : "rgba(255,255,255,0.15)", boxShadow: selected ? `0 0 0 1px ${ACCENT}` : "none" }}
+    >
+      <div className="flex items-center justify-between mb-1">
+        <span className="font-semibold text-sm">{group.name}</span>
+        {complete && <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase" style={{ background: ACCENT_SECONDARY, color: "#08201c" }}>Done</span>}
+      </div>
+      <div className="text-[11px] text-white/60 mb-2">{playerCount} players • {played}/{total} matches played</div>
+      <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.1)" }}>
+        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: complete ? ACCENT_SECONDARY : ACCENT }} />
+      </div>
+    </button>
+  );
+}
+
 /* ---------------- Component ---------------- */
 export default function TournamentMaker() {
   const [tab, setTab] = useState("dashboard");
@@ -780,6 +805,9 @@ export default function TournamentMaker() {
   // Admin tab data (super admin only)
   const [profiles, setProfiles] = useState([]);
   const [profilesLoading, setProfilesLoading] = useState(false);
+
+  // FIXTURES tab: which group is currently drilled into, per tournament ({ [tournamentId]: groupId })
+  const [selectedGroupByTournament, setSelectedGroupByTournament] = useState({});
 
   // Builder state
   const [tName, setTName] = useState("");
@@ -1513,15 +1541,35 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 }
                 defaultOpen={true}
               >
-                {isGroupFmt && (
-                  <div className="mb-4">
-                    {tn.groups.map((g) => {
-                      const groupMatches = tn.matches.filter((m) => m.groupId === g.id);
-                      return (
-                        <div key={g.id} className="mb-4">
-                          <h4 className="font-semibold text-sm mb-1">{g.name}</h4>
-                          <div className="divide-y" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
-                            {groupMatches.map((m, i) => (
+                {isGroupFmt && (() => {
+                  const activeGroupId = selectedGroupByTournament[tn.id] || tn.groups[0]?.id;
+                  const activeGroup = tn.groups.find((g) => g.id === activeGroupId) || tn.groups[0];
+                  const activeGroupMatches = activeGroup ? tn.matches.filter((m) => m.groupId === activeGroup.id) : [];
+                  return (
+                    <div className="mb-4">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">
+                        {tn.groups.map((g) => {
+                          const groupMatches = tn.matches.filter((m) => m.groupId === g.id);
+                          const played = groupMatches.filter((m) => m.winnerId).length;
+                          return (
+                            <GroupCard
+                              key={g.id}
+                              group={g}
+                              playerCount={g.teamIds.length}
+                              played={played}
+                              total={groupMatches.length}
+                              selected={g.id === activeGroup?.id}
+                              onClick={() => setSelectedGroupByTournament((prev) => ({ ...prev, [tn.id]: g.id }))}
+                            />
+                          );
+                        })}
+                      </div>
+
+                      {activeGroup && (
+                        <div className="border rounded-2xl overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.12)" }}>
+                          <div className="px-3 py-2 glass-header text-sm font-semibold">{activeGroup.name} fixtures</div>
+                          <div className="divide-y px-3" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
+                            {activeGroupMatches.map((m, i) => (
                               <MatchRow
                                 key={m.id}
                                 idx={i + 1}
@@ -1536,10 +1584,10 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                             ))}
                           </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {ko.length > 0 && (
                   <div className="divide-y" style={{ borderColor: "rgba(255,255,255,0.08)" }}>

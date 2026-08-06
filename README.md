@@ -2,7 +2,13 @@
 
 Multi-sport tournament maker: knockout brackets, round-robin groups, seeding,
 live fixtures/standings, and PDF/Excel export. React + Vite frontend on
-GitHub Pages; a small serverless API on Vercel handles admin auth and writes.
+GitHub Pages; Supabase (Postgres + Auth + Row-Level Security) for accounts,
+data, and per-organizer isolation.
+
+**v2 note:** this replaced the earlier JSONBin + Vercel-proxy + shared
+access-code setup entirely. If you were mid-way through that runbook, stop —
+none of it applies anymore. See "Supersedes" in the project's plan history
+if you want the full reasoning.
 
 ## Local development
 
@@ -11,81 +17,105 @@ npm install
 npm run dev
 ```
 
-The frontend reads tournament data directly from JSONBin (public read, no
-key needed). To test admin actions (login, save, score entry) locally,
-point `src/db.js`'s `BIN_ID` at a **throwaway/staging** JSONBin bin — never
-the production one — and run a local copy of the API (`vercel dev`, or just
-stub `adminLogin`/`saveStore` while iterating on UI).
+You need a Supabase project even for local dev — there's no more
+"just read a public bin" mode, since tournament data is now scoped per
+signed-in user via Row-Level Security. See "One-time backend setup" below;
+it takes about 5 minutes and the free tier is enough for this app's scale.
 
 ## Architecture
 
-- **Frontend** (`src/`) — deployed to GitHub Pages via `.github/workflows/deploy.yml`
-  on every push to `main`. Same URL as today.
-- **API** (`api/`) — two serverless functions, deployed separately to Vercel
-  (Vercel auto-detects the `api/` folder; GitHub Pages ignores it):
-  - `POST /api/admin-login` — exchanges an access code for a signed session token.
-  - `POST /api/tournaments` — writes the tournament snapshot to JSONBin;
-    requires a valid admin token. Reads bypass this and hit JSONBin directly
-    (it's a public-read bin, so no secret is needed for reads).
-- **Data store** — JSONBin (`src/db.js`). One shared bin for the whole site.
+- **Frontend** (`src/`) — deployed to GitHub Pages via
+  `.github/workflows/deploy.yml` on every push to `main`. Same URL as
+  before.
+- **Backend** — entirely Supabase, no custom server code:
+  - **Auth** (`src/auth/`) — Supabase Auth (email/password). Every sign-up
+    auto-creates a `profiles` row (`role: "user"`, `tier: "free"`) via a
+    database trigger — see `supabase/migrations/0001_init.sql`.
+  - **Data** (`src/db.js`) — the `tournaments` table, one row per
+    tournament. Row-Level Security policies mean a normal user's
+    queries only ever reach their own rows; the super admin's reach
+    everyone's. This is enforced by Postgres itself, not application code.
+  - **Tier limits** — a database trigger (`enforce_tier_limits`) rejects
+    any insert/update that puts a free-tier tournament over 8 participants,
+    or gives it more than one round-robin group, or adds a knockout stage.
+    The UI also hides those options for free-tier users, but the trigger is
+    the actual enforcement — it can't be bypassed by editing client code.
 
-## One-time deploy setup
+## One-time backend setup
 
-1. **Rotate the JSONBin key.** The old master key was committed to this repo
-   and is public — log into jsonbin.io → your bin → regenerate the Master
-   Key. Never put the new key in a file; it only goes into Vercel env vars
-   (step 3).
-2. **Create the Vercel project.** vercel.com → "Add New… → Project" → import
-   this GitHub repo. Vercel will build it automatically; you can ignore the
-   `*.vercel.app` URL it gives the frontend — we only use its `/api/*` routes.
-3. **Set environment variables** in Vercel (Project Settings → Environment
-   Variables):
-   | Variable | Value |
-   |---|---|
-   | `JSONBIN_BIN_ID` | the bin ID (currently `68b15f2fd0ea881f4069feab`) |
-   | `JSONBIN_MASTER_KEY` | the **new**, rotated master key from step 1 |
-   | `ADMIN_CODES` | `code1:Alice,code2:Bob` — see "Admin access" below |
-   | `SESSION_SECRET` | any long random string (e.g. `openssl rand -hex 32`) |
-
-   Redeploy after setting these (Vercel does this automatically on save, or
-   click "Redeploy").
-4. **Point the frontend at your Vercel API.** Edit `src/config.js`:
+1. **Create a Supabase project.** supabase.com → sign up → New Project.
+   Free tier is fine. Note the project's URL and **anon** key
+   (Settings → API) — unlike the old JSONBin master key, the anon key is
+   *safe* to put in client code, because Row-Level Security (not key
+   secrecy) is what actually protects the data.
+2. **Apply the schema.** Open the Supabase SQL Editor and run the contents
+   of `supabase/migrations/0001_init.sql` once.
+3. **Point the app at your project.** Edit `src/config.js`:
    ```js
-   export const API_BASE = "https://your-project.vercel.app";
+   export const SUPABASE_URL = "https://your-project.supabase.co";
+   export const SUPABASE_ANON_KEY = "your-anon-key";
    ```
    Commit and push — GitHub Pages redeploys the frontend automatically.
+4. **Sign up as yourself** in the running app (Dashboard tab → Sign Up).
+   This creates your `profiles` row.
+5. **Bootstrap yourself as super admin.** There's no self-serve promotion
+   (deliberately — see the migration file). In the Supabase SQL Editor:
+   ```sql
+   update public.profiles set role = 'super_admin' where email = 'you@example.com';
+   ```
+   Refresh the app — you'll now see the Admin tab.
+6. **(Optional) Migrate the old live tournament data.** If you had
+   tournaments in the old JSONBin store, run
+   `scripts/migrate-jsonbin-to-supabase.mjs` once — see the comment at the
+   top of that file for exact usage. It needs your Supabase **service
+   role** key (different from the anon key, never used in the browser) as
+   an environment variable, passed on the command line — never commit it.
 
-## Admin access (multi-user, paid)
+## Roles & tiers
 
-There's no per-customer database — admin access is a shared list of named
-access codes, checked server-side. This is intentionally lightweight: every
-admin code can manage the *same* site's tournaments (there's one JSONBin per
-deployment), there's no password reset flow, and the only audit trail is the
-display name shown next to "Logged in as:".
+- **Free** (default for every new sign-up): one round-robin group, up to
+  8 participants, no knockout bracket.
+- **Paid**: unlimited participants, any format (knockout, or groups with a
+  knockout stage after).
+- **Super admin**: exactly one account (you, bootstrapped in step 5 above).
+  Sees every organizer's tournaments and users from the **Admin** tab
+  (read/oversight — the normal Schedule/Fixtures/etc. tabs still only ever
+  show *your own* tournaments, even for the super admin, so day-to-day use
+  looks the same as any other account). Can grant or revoke paid tier for
+  any user from that same tab.
 
-**To sell/grant a new admin seat:**
-1. Get paid however you like (UPI, cash, bank transfer — no payment
-   integration here).
-2. Pick a new unique code, e.g. `aug2026-priya`.
-3. Add `,aug2026-priya:Priya` to the `ADMIN_CODES` env var in Vercel.
-4. Redeploy (one click).
-5. Share the code with them — they enter it under "Admin Login".
+**To grant paid access:** get paid however you like (this app has no
+payment integration) → open the **Admin** tab → find the user → click
+**Grant Paid**. To revoke, click **Revoke to Free** on the same row.
 
-**To revoke access:** remove their `code:Name` pair from `ADMIN_CODES` and
-redeploy. Any session tokens already issued to them still work until they
-expire (12h) — for immediate revocation, rotate `SESSION_SECRET` (this logs
-*everyone* out, including other current admins).
+**On isolation:** one organizer's tournament data is invisible to another
+organizer by construction — every query is filtered by Postgres
+Row-Level-Security policies (`owner_id = auth.uid()`), not by anything the
+client asks nicely for. This is access control, not encryption — the
+super-admin bypass (`is_super_admin()`) is a deliberate, narrow exception
+built into the same policies, not a separate backdoor.
 
-If you outgrow this (want truly separate tournaments per paying customer,
-real password reset, audit logs, or actual Stripe billing), that needs a
-real database + auth provider (e.g. Supabase) — a bigger rebuild than this
-round covered.
+## Roadmap (not built yet)
+
+These were scoped out of this round so each phase ships as something
+actually testable, rather than one huge unreviewable change:
+
+- **Public registration links** — a shareable per-tournament link with a
+  deadline; anyone can self-register (no account needed) up to that
+  deadline; the organizer approves/rejects and can add or remove
+  participants at any time regardless of the deadline.
+- **Email notifications** — participants get emailed when fixtures are
+  generated or change. Needs a Supabase Edge Function (to hold a Resend
+  API key server-side) triggered on tournament updates.
+- **Public live spectator view** — a read-only link, no login, that
+  updates live via Supabase Realtime instead of on refresh. The "Explore"
+  tab is a placeholder for this today.
 
 ## Sport engine
 
 Tournaments carry a `sport` id (`src/sports/registry.js`) and a `format`
 (`"knockout"` or `"groups"`). Existing tournaments with no `sport`/`format`
-field default to `sport: "generic"`, `format: "knockout"` — today's
+field default to `sport: "generic"`, `format: "knockout"` — the original
 pick-a-winner single-elimination behavior, unchanged.
 
 **Implemented:**
@@ -98,7 +128,8 @@ pick-a-winner single-elimination behavior, unchanged.
   computes a standings table (Played/Won/Lost/Points, tiebreak by
   head-to-head then point differential). Works with any sport whose matches
   end up with a `winnerId`. "Generate Knockout Bracket" seeds the top N per
-  group into the existing knockout engine once every group is complete.
+  group into the existing knockout engine once every group is complete
+  (paid tier only — free tier stops at the round-robin stage).
 
 **Designed but not yet built** (`implemented: false` in the registry —
 extend `sports/` following the `badminton.js` pattern):

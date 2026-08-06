@@ -1,6 +1,8 @@
-// ====== Persistence glue (backend-agnostic) ======
+// ====== Persistence glue (Supabase-backed, see src/db.js) ======
 import React, { useEffect, useMemo, useState, useRef } from "react";
-import { loadStoreOnce, saveStore, adminLogin } from "./db";
+import { loadStoreOnce, saveStore, adminSetTier, adminListProfiles } from "./db";
+import { useAuth } from "./auth/AuthContext";
+import AuthForms from "./auth/AuthForms";
 import { getSport, listSelectableSports } from "./sports/registry";
 import {
   splitIntoGroups,
@@ -15,6 +17,7 @@ import {
   isMatchComplete as isGamesMatchComplete,
   pointsDiffFromGames,
 } from "./sports/badminton";
+import { ACCENT, ACCENT_SECONDARY } from "./theme";
 
 /* Using CDN globals (index.html):
    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -25,13 +28,16 @@ import {
 
 /**
  * FixtureForge — Multi-Sport Tournament Maker
- * Tabs: SCHEDULE (admin only), FIXTURES, STANDINGS, WINNERS, DELETED (admin only)
+ * Tabs: DASHBOARD, SCHEDULE, FIXTURES, STANDINGS, WINNERS, DELETED (all
+ * scoped to the signed-in organizer's own tournaments), EXPLORE (public,
+ * placeholder), ADMIN (super admin only — cross-organizer oversight).
  */
 
-const TM_BLUE = "#0f4aa1";
+const TM_BLUE = ACCENT; // kept as an alias so the many existing borderColor:TM_BLUE references pick up the new palette
 const NEW_TOURNEY_SENTINEL = "__NEW__";
-const ADMIN_SESSION_KEY = "ff_admin_session"; // { token, name, exp }
+const FREE_TIER_MAX_PLAYERS = 8;
 const uid = () => Math.random().toString(36).slice(2, 9);
+const uuid = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${uid()}-${uid()}-${uid()}`);
 
 /* ---------------- Helpers ---------------- */
 function normalizeHeader(h) {
@@ -102,20 +108,6 @@ function groupMatchesByRound(matches) {
   const byRound = new Map();
   for (const m of matches) { if (!byRound.has(m.round)) byRound.set(m.round, []); byRound.get(m.round).push(m); }
   return Array.from(byRound.entries()).sort((a, b) => a[0] - b[0]).map(([round, matches]) => ({ round, matches }));
-}
-function readAdminSession() {
-  try {
-    const raw = localStorage.getItem(ADMIN_SESSION_KEY);
-    if (!raw) return null;
-    const session = JSON.parse(raw);
-    if (!session?.token || !session?.exp || Date.now() > session.exp) {
-      localStorage.removeItem(ADMIN_SESSION_KEY);
-      return null;
-    }
-    return session;
-  } catch {
-    return null;
-  }
 }
 function knockoutMatches(tn) {
   return (tn.matches || []).filter((m) => (m.stage || "knockout") === "knockout");
@@ -779,14 +771,15 @@ function GroupStandingsTable({ group, standings, teamMap }) {
 
 /* ---------------- Component ---------------- */
 export default function TournamentMaker() {
-  const [tab, setTab] = useState("fixtures");
+  const [tab, setTab] = useState("dashboard");
 
-  // Admin — session = { token, name, exp } | null
-  const [adminSession, setAdminSession] = useState(() => readAdminSession());
-  const isAdmin = !!adminSession;
-  const [showLogin, setShowLogin] = useState(false);
-  const [loginCode, setLoginCode] = useState("");
-  const [loginBusy, setLoginBusy] = useState(false);
+  // Auth — real Supabase account, not the old shared access-code scheme.
+  const { user, profile, loading: authLoading, isSuperAdmin, isPaid, signOut } = useAuth();
+  const isLoggedIn = !!user;
+
+  // Admin tab data (super admin only)
+  const [profiles, setProfiles] = useState([]);
+  const [profilesLoading, setProfilesLoading] = useState(false);
 
   // Builder state
   const [tName, setTName] = useState("");
@@ -828,7 +821,33 @@ export default function TournamentMaker() {
     }
   }
 
-  useEffect(() => { refreshFromStore(); }, []);
+  useEffect(() => {
+    if (!user) { setTournaments([]); setDeletedTournaments([]); setLoadState("ready"); return; }
+    refreshFromStore();
+  }, [user]);
+
+  // Free-tier tournaments are always a single round-robin group — lock the
+  // builder state to that shape rather than letting a stale paid-tier
+  // selection linger (e.g. right after a downgrade).
+  useEffect(() => {
+    if (isPaid) return;
+    setFormat("groups"); setNumGroups(1); setAdvancePerGroup(1);
+  }, [isPaid]);
+
+  useEffect(() => {
+    if (!isSuperAdmin || tab !== "admin") return;
+    setProfilesLoading(true);
+    adminListProfiles().then(setProfiles).catch((e) => console.warn("Failed to load profiles:", e)).finally(() => setProfilesLoading(false));
+  }, [isSuperAdmin, tab]);
+
+  // RLS already scopes `tournaments`/`deletedTournaments` to what the caller
+  // may read (own rows, or — for the super admin — everyone's). The normal
+  // tabs (Schedule/Fixtures/Standings/Winners/Deleted) only ever show the
+  // signed-in user's *own* tournaments, even for the super admin — cross-
+  // organizer visibility is deliberately confined to the Admin tab instead
+  // of leaking into everyday editing screens.
+  const myTournaments = useMemo(() => tournaments.filter((t) => t.ownerId === user?.id), [tournaments, user]);
+  const myDeletedTournaments = useMemo(() => deletedTournaments.filter((t) => t.ownerId === user?.id), [deletedTournaments, user]);
 
   const builderTeamMap = useMemo(
     () => Object.fromEntries(builderTeams.map((tm) => [tm.name, tm.id])),
@@ -836,7 +855,7 @@ export default function TournamentMaker() {
   );
 
   function loadTeamsFromText() {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     const lines = namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     const uniq = Array.from(new Set(lines));
     const dups = findDuplicateNamesCaseInsensitive(lines);
@@ -852,7 +871,7 @@ export default function TournamentMaker() {
   }
 
   async function handlePlayersUpload(file) {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     if (!file) return;
     const ext = (file.name.split(".").pop() || "").toLowerCase();
     let names = [];
@@ -922,7 +941,7 @@ export default function TournamentMaker() {
   // across groups (all rank-1s, then all rank-2s, ...) so same-group teams
   // are less likely to meet in the very first round.
   function generateKnockoutFromGroups(tournamentId) {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     setTournaments((prev) => prev.map((tn) => {
       if (tn.id !== tournamentId) return tn;
       if (!canGenerateKnockoutFromGroups(tn)) return tn;
@@ -951,7 +970,7 @@ export default function TournamentMaker() {
   }
 
   function pickWinner(tournamentId, matchId, winnerId) {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     setTournaments((prev) => prev.map((tn) => {
       if (tn.id !== tournamentId) return tn;
       const matches = tn.matches.map((m) => (m.id === matchId ? { ...m, winnerId, status: winnerId ? "Final" : m.status } : m));
@@ -962,7 +981,7 @@ export default function TournamentMaker() {
   // Updates the game-by-game score for a "games"-model match (badminton) and
   // derives the winner once enough games have been won.
   function updateMatchGames(tournamentId, matchId, games) {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     setTournaments((prev) => prev.map((tn) => {
       if (tn.id !== tournamentId) return tn;
       const sport = getSport(tn.sport);
@@ -977,7 +996,7 @@ export default function TournamentMaker() {
     }));
   }
   function generateNextRound(tournamentId) {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     setTournaments((prev) => prev.map((tn) => {
       if (tn.id !== tournamentId) return tn;
       if (!canGenerateNext(tn)) return tn;
@@ -995,9 +1014,9 @@ export default function TournamentMaker() {
     }));
   }
 
-  function openDeleteModal(tournamentId) { if (!isAdmin) return alert("Admin only."); setDeleteTargetId(tournamentId); setShowDeleteModal(true); }
+  function openDeleteModal(tournamentId) { if (!isLoggedIn) return alert("Please log in first."); setDeleteTargetId(tournamentId); setShowDeleteModal(true); }
   function confirmDelete() {
-    if (!isAdmin) return;
+    if (!isLoggedIn) return;
     setTournaments((prev) => {
       const idx = prev.findIndex((t) => t.id === deleteTargetId); if (idx === -1) return prev;
       const t = prev[idx]; const remaining = [...prev.slice(0, idx), ...prev.slice(idx + 1)];
@@ -1009,7 +1028,7 @@ export default function TournamentMaker() {
   }
   function cancelDelete() { setShowDeleteModal(false); setDeleteTargetId(null); }
   function restoreTournament(tournamentId) {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     setDeletedTournaments((prevDeleted) => {
       const idx = prevDeleted.findIndex((t) => t.id === tournamentId);
       if (idx === -1) return prevDeleted;
@@ -1020,14 +1039,14 @@ export default function TournamentMaker() {
     setTab("fixtures");
   }
   function deleteForever(tournamentId) {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     const ok = window.confirm("Permanently delete this tournament from DELETED?\nThis cannot be undone.");
     if (!ok) return;
     setDeletedTournaments((prev) => prev.filter((t) => t.id !== tournamentId));
   }
 
   function applyEntriesToTournament(tournamentId, newNames) {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     const dups = findDuplicateNamesCaseInsensitive(newNames);
     if (dups.length > 0) {
       alert("Duplicate names found:\n\n" + dups.map((n) => `• ${n}`).join("\n") + "\n\nPlease remove duplicates and try again.");
@@ -1067,7 +1086,7 @@ export default function TournamentMaker() {
   }
 
   function createTournament() {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     if (targetTournamentId !== NEW_TOURNEY_SENTINEL) {
       const names = builderTeams.length ? builderTeams.map((b) => b.name) : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       applyEntriesToTournament(targetTournamentId, names);
@@ -1080,6 +1099,11 @@ export default function TournamentMaker() {
     const dups = findDuplicateNamesCaseInsensitive(names);
     if (dups.length > 0) return alert("Duplicate names found:\n\n" + dups.map((n) => `• ${n}`).join("\n"));
 
+    if (!isPaid) {
+      if (builderTeams.length > FREE_TIER_MAX_PLAYERS) return alert(`Free tier is limited to ${FREE_TIER_MAX_PLAYERS} participants. Ask the site owner for paid access to go bigger.`);
+      if (format !== "groups" || numGroups !== 1) return alert("Free tier tournaments are round-robin only (a single group). Ask the site owner for paid access to unlock brackets.");
+    }
+
     if (format === "groups") {
       if (builderTeams.length < numGroups * 2) return alert(`Need at least ${numGroups * 2} entries for ${numGroups} groups.`);
       const groupIds = Array.from({ length: numGroups }, () => uid());
@@ -1089,7 +1113,7 @@ export default function TournamentMaker() {
       const advance = Math.min(advancePerGroup, Math.min(...buckets.map((b) => b.length)));
 
       const tourney = {
-        id: uid(), name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active",
+        id: uuid(), ownerId: user.id, name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active",
         sport: sportId, format: "groups", groups, groupStage: { advancePerGroup: advance, complete: false },
         championId: null,
       };
@@ -1111,7 +1135,7 @@ export default function TournamentMaker() {
     const seedTopId = builderTeamMap[seed1], seedBottomId = builderTeamMap[seed2];
     const seed3Id = picked.length === 4 ? builderTeamMap[seed3] : null, seed4Id = picked.length === 4 ? builderTeamMap[seed4] : null;
 
-    const tourney = { id: uid(), name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active", sport: sportId, format: "knockout", seedTopId, seedBottomId, seed3Id, seed4Id, championId: null };
+    const tourney = { id: uuid(), ownerId: user.id, name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active", sport: sportId, format: "knockout", seedTopId, seedBottomId, seed3Id, seed4Id, championId: null };
     setTournaments((prev) => [tourney, ...prev]);
 
     setTName(""); setNamesText(""); setSeed1(""); setSeed2(""); setSeed3(""); setSeed4(""); setBuilderTeams([]); setSportId("generic"); setFormat("knockout");
@@ -1119,56 +1143,29 @@ export default function TournamentMaker() {
   }
 
   const saveAll = async () => {
-    if (!isAdmin) return alert("Admin only.");
+    if (!isLoggedIn) return alert("Please log in first.");
     try {
-      await saveStore({ tournaments, deleted: deletedTournaments }, adminSession.token);
+      await saveStore({ tournaments, deleted: deletedTournaments }, user.id);
       alert("Saved.");
     } catch (e) {
       console.error(e);
-      if (String(e.message || "").includes("401")) {
-        setAdminSession(null); localStorage.removeItem(ADMIN_SESSION_KEY);
-        alert("Your admin session expired. Please log in again and retry.");
-      } else {
-        alert(`Save failed: ${e.message || "check console"}`);
-      }
+      alert(`Save failed: ${e.message || "check console"}`);
     }
   };
-
-  async function handleAdminLogin(e) {
-    e.preventDefault();
-    setLoginBusy(true);
-    try {
-      const { token, name } = await adminLogin(loginCode.trim());
-      const exp = Date.now() + 12 * 60 * 60 * 1000;
-      const session = { token, name, exp };
-      setAdminSession(session);
-      localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(session));
-      setShowLogin(false); setLoginCode("");
-    } catch (err) {
-      alert(err.message || "Invalid access code");
-    } finally {
-      setLoginBusy(false);
-    }
-  }
-  function handleAdminLogout() {
-    setAdminSession(null);
-    localStorage.removeItem(ADMIN_SESSION_KEY);
-    if (tab === "schedule" || tab === "deleted") setTab("fixtures");
-  }
 
   const gpStyles = `
 @keyframes diagPan { 0% { background-position: 0 0; } 100% { background-position: 400px 400px; } }
 @keyframes floatPan { 0% { transform: translate3d(0,0,0); } 100% { transform: translate3d(-80px,-80px,0); } }
-.gp3d { text-shadow: 0 1px 0 rgba(0,0,0,.35), 0 2px 0 rgba(0,0,0,.35), 0 3px 0 rgba(0,0,0,.32), 0 4px 0 rgba(0,0,0,.30), 0 5px 0 rgba(0,0,0,.28), 0 6px 0 rgba(0,0,0,.25), 0 12px 20px rgba(0,0,0,.45), 0 0 8px rgba(0,177,231,.25); transition: transform .3s ease, text-shadow .3s ease, filter .3s ease; }
-.gpGroup:hover .gp3d { transform: translateY(-4px); text-shadow: 0 2px 0 rgba(0,0,0,.35), 0 4px 0 rgba(0,0,0,.33), 0 6px 0 rgba(0,0,0,.31), 0 8px 0 rgba(0,0,0,.30), 0 18px 28px rgba(0,0,0,.55), 0 0 14px rgba(0,177,231,.45); filter: drop-shadow(0 0 6px rgba(0,177,231,.25)); }
-.pageBg { background-image: radial-gradient(1200px 600px at 10% 0%, rgba(0,177,231,.25), transparent 60%), radial-gradient(900px 500px at 90% 20%, rgba(15,74,161,.35), transparent 60%), linear-gradient(180deg, #080b14 0%, #0a1020 40%, #0e1a33 100%); background-attachment: fixed; }
+.gp3d { text-shadow: 0 1px 0 rgba(0,0,0,.35), 0 2px 0 rgba(0,0,0,.35), 0 3px 0 rgba(0,0,0,.32), 0 4px 0 rgba(0,0,0,.30), 0 5px 0 rgba(0,0,0,.28), 0 6px 0 rgba(0,0,0,.25), 0 12px 20px rgba(0,0,0,.45), 0 0 8px rgba(255,90,31,.30); transition: transform .3s ease, text-shadow .3s ease, filter .3s ease; }
+.gpGroup:hover .gp3d { transform: translateY(-4px); text-shadow: 0 2px 0 rgba(0,0,0,.35), 0 4px 0 rgba(0,0,0,.33), 0 6px 0 rgba(0,0,0,.31), 0 8px 0 rgba(0,0,0,.30), 0 18px 28px rgba(0,0,0,.55), 0 0 14px rgba(0,201,167,.45); filter: drop-shadow(0 0 6px rgba(255,90,31,.30)); }
+.pageBg { background-image: radial-gradient(1200px 600px at 10% 0%, rgba(255,90,31,.22), transparent 60%), radial-gradient(900px 500px at 90% 20%, rgba(0,201,167,.20), transparent 60%), linear-gradient(180deg, #0c0a09 0%, #100d0b 40%, #171310 100%); background-attachment: fixed; }
 .glass { background: rgba(255,255,255,0.04); backdrop-filter: blur(10px); }
 .glass-header { background: rgba(255,255,255,0.06); backdrop-filter: blur(6px); }
 .field { background: rgba(255,255,255,0.05); color: #fff; }
 `;
 
-  const activeTournaments = tournaments.filter((tn) => tn.status === "active");
-  const completedTournaments = tournaments.filter((tn) => tn.status === "completed");
+  const activeTournaments = myTournaments.filter((tn) => tn.status === "active");
+  const completedTournaments = myTournaments.filter((tn) => tn.status === "completed");
 
   return (
     <div className="p-3 sm:p-4 text-white min-h-screen pageBg" style={{ position: "relative", zIndex: 1 }}>
@@ -1185,64 +1182,48 @@ export default function TournamentMaker() {
 
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-3 mb-3 sm:mb-4">
         <div className="flex flex-wrap gap-2">
-          {isAdmin && <TabButton id="schedule" label="SCHEDULE" tab={tab} setTab={setTab} />}
-          <TabButton id="fixtures" label="FIXTURES" tab={tab} setTab={setTab} />
-          <TabButton id="standings" label="STANDINGS" tab={tab} setTab={setTab} />
-          <TabButton id="winners" label="WINNERS" tab={tab} setTab={setTab} />
-          {isAdmin && <TabButton id="deleted" label="DELETED" tab={tab} setTab={setTab} />}
+          <TabButton id="dashboard" label="DASHBOARD" tab={tab} setTab={setTab} />
+          {isLoggedIn && <TabButton id="schedule" label="SCHEDULE" tab={tab} setTab={setTab} />}
+          {isLoggedIn && <TabButton id="fixtures" label="FIXTURES" tab={tab} setTab={setTab} />}
+          {isLoggedIn && <TabButton id="standings" label="STANDINGS" tab={tab} setTab={setTab} />}
+          {isLoggedIn && <TabButton id="winners" label="WINNERS" tab={tab} setTab={setTab} />}
+          {isLoggedIn && <TabButton id="deleted" label="DELETED" tab={tab} setTab={setTab} />}
+          <TabButton id="explore" label="EXPLORE" tab={tab} setTab={setTab} />
+          {isSuperAdmin && <TabButton id="admin" label="ADMIN" tab={tab} setTab={setTab} />}
         </div>
         <div className="flex flex-wrap gap-2 items-center">
-          {(tab === "fixtures" || (tab === "deleted" && isAdmin)) && (
+          {(tab === "fixtures" || tab === "deleted") && isLoggedIn && (
             <button className="px-3 py-2 border rounded hover:opacity-90" style={{ borderColor: TM_BLUE }} onClick={saveAll}>Save</button>
           )}
-          {!isAdmin ? (
-            <button className="px-3 py-2 border rounded hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => setShowLogin(true)}>Admin Login</button>
-          ) : (
+          {isLoggedIn && (
             <>
-              <span className="text-xs text-white/70">Logged in as: <b>{adminSession.name}</b></span>
-              <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={handleAdminLogout}>Logout</button>
+              <span className="text-xs text-white/70">
+                {profile?.display_name || user.email}
+                <span className="ml-2 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase" style={{ background: isPaid ? ACCENT_SECONDARY : "rgba(255,255,255,0.15)", color: isPaid ? "#08201c" : "#fff" }}>
+                  {isSuperAdmin ? "Super Admin" : isPaid ? "Paid" : "Free"}
+                </span>
+              </span>
+              <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={signOut}>Sign Out</button>
             </>
           )}
         </div>
       </div>
 
-      {loadState === "loading" && (
+      {isLoggedIn && loadState === "loading" && (
         <div className="mb-3 sm:mb-4 border rounded-2xl p-3 text-sm glass flex items-center gap-2" style={{ borderColor: TM_BLUE }}>
           <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
           Loading tournaments…
         </div>
       )}
-      {loadState === "error" && (
+      {isLoggedIn && loadState === "error" && (
         <div className="mb-3 sm:mb-4 border border-red-400 rounded-2xl p-3 text-sm glass flex flex-wrap items-center justify-between gap-2">
           <span className="text-red-300">Couldn't load tournaments: {loadError}</span>
           <button className="px-3 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={refreshFromStore}>Retry</button>
         </div>
       )}
 
-      {/* Admin Login */}
-      {showLogin && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-3">
-          <div className="w-full max-w-sm border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="font-semibold">Admin Login</h3>
-              <button className="w-6 h-6 border border-white rounded text-xs hover:bg-white hover:text-black" onClick={() => setShowLogin(false)}>×</button>
-            </div>
-            <form onSubmit={handleAdminLogin} className="space-y-3">
-              <div>
-                <label className="text-xs">Access Code</label>
-                <input className="w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={loginCode} onChange={(e) => setLoginCode(e.target.value)} placeholder="enter your access code" autoFocus />
-              </div>
-              <button type="submit" disabled={loginBusy} className="w-full px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black disabled:opacity-50">
-                {loginBusy ? "Checking…" : "Login"}
-              </button>
-              <p className="text-xs text-white/60">Don't have a code? Contact the site owner to get admin access.</p>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* Delete confirm */}
-      {showDeleteModal && isAdmin && (
+      {showDeleteModal && isLoggedIn && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-3">
           <div className="w-full max-w-md border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
             <h3 className="font-semibold mb-2">Confirm Delete</h3>
@@ -1255,8 +1236,55 @@ export default function TournamentMaker() {
         </div>
       )}
 
+      {/* DASHBOARD */}
+      {tab === "dashboard" && (
+        isLoggedIn ? (
+          <section className="border rounded-2xl p-4 sm:p-6 glass" style={{ borderColor: TM_BLUE }}>
+            <h2 className="text-xl font-semibold mb-1">Welcome back, {profile?.display_name || user.email}</h2>
+            <p className="text-sm text-white/70 mb-4">
+              {isSuperAdmin ? "Super admin — you can see every organizer's tournaments from the Admin tab." :
+                isPaid ? "Paid access: unlimited participants, any format." :
+                `Free tier: up to ${FREE_TIER_MAX_PLAYERS} participants, round robin only.`}
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+              <div className="border rounded-xl p-3 text-center" style={{ borderColor: TM_BLUE }}>
+                <div className="text-2xl font-bold">{activeTournaments.length}</div>
+                <div className="text-xs text-white/60">Active</div>
+              </div>
+              <div className="border rounded-xl p-3 text-center" style={{ borderColor: TM_BLUE }}>
+                <div className="text-2xl font-bold">{completedTournaments.length}</div>
+                <div className="text-xs text-white/60">Completed</div>
+              </div>
+              <div className="border rounded-xl p-3 text-center" style={{ borderColor: TM_BLUE }}>
+                <div className="text-2xl font-bold">{myDeletedTournaments.length}</div>
+                <div className="text-xs text-white/60">Deleted</div>
+              </div>
+              <div className="border rounded-xl p-3 text-center" style={{ borderColor: TM_BLUE }}>
+                <div className="text-2xl font-bold uppercase">{isSuperAdmin ? "Super" : isPaid ? "Paid" : "Free"}</div>
+                <div className="text-xs text-white/60">Plan</div>
+              </div>
+            </div>
+            <button className="px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black" onClick={() => setTab("schedule")}>
+              Create a tournament
+            </button>
+          </section>
+        ) : (
+          <section>
+            <div className="text-center mb-6">
+              <h2 className="text-2xl font-semibold mb-2">Run tournaments for any sport, free to start</h2>
+              <p className="text-sm text-white/70 max-w-lg mx-auto">
+                Sign up to create round-robin and knockout tournaments, track fixtures and standings, and
+                export brackets to PDF or Excel. Free accounts get a round-robin group of up to {FREE_TIER_MAX_PLAYERS} players —
+                ask the site owner for paid access to unlock brackets and larger fields.
+              </p>
+            </div>
+            <AuthForms onDone={() => setTab("dashboard")} />
+          </section>
+        )
+      )}
+
       {/* SCHEDULE */}
-      {tab === "schedule" && (isAdmin ? (
+      {tab === "schedule" && (isLoggedIn ? (
         <section className="grid md:grid-cols-2 gap-3 sm:gap-4">
           <div className="border rounded-2xl p-3 sm:p-4 glass" style={{ borderColor: TM_BLUE }}>
             <h2 className="font-semibold mb-3">Tournament Setup</h2>
@@ -1267,7 +1295,7 @@ export default function TournamentMaker() {
                 <DarkSelect
                   value={targetTournamentId}
                   onChange={setTargetTournamentId}
-                  options={[{ value: NEW_TOURNEY_SENTINEL, label: "➕ Create New Tournament" }, ...tournaments.map(t => ({ value: t.id, label: t.name }))]}
+                  options={[{ value: NEW_TOURNEY_SENTINEL, label: "➕ Create New Tournament" }, ...myTournaments.map(t => ({ value: t.id, label: t.name }))]}
                 />
               </div>
             </label>
@@ -1279,6 +1307,13 @@ export default function TournamentMaker() {
                   <input className="mt-1 w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={tName} onChange={(e) => setTName(e.target.value)} placeholder="e.g., Office TT Cup — Aug 2025" />
                 </label>
 
+                {!isPaid && (
+                  <p className="text-xs mb-3 px-3 py-2 rounded-xl border" style={{ borderColor: ACCENT_SECONDARY, color: ACCENT_SECONDARY }}>
+                    Free tier: single round-robin group, up to {FREE_TIER_MAX_PLAYERS} players, no knockout bracket.
+                    Ask the site owner for paid access to unlock brackets and larger fields.
+                  </p>
+                )}
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
                   <label className="text-xs">
                     Sport
@@ -1287,19 +1322,26 @@ export default function TournamentMaker() {
                         options={listSelectableSports().filter(s => s.implemented).map(s => ({ value: s.id, label: s.label }))} />
                     </div>
                   </label>
-                  <label className="text-xs">
-                    Format
-                    <div className="mt-1">
-                      <DarkSelect value={format} onChange={setFormat}
-                        options={[
-                          { value: "knockout", label: "Knockout only" },
-                          ...(getSport(sportId).supportsGroups ? [{ value: "groups", label: "Groups + Knockout" }] : []),
-                        ]} />
-                    </div>
-                  </label>
+                  {isPaid ? (
+                    <label className="text-xs">
+                      Format
+                      <div className="mt-1">
+                        <DarkSelect value={format} onChange={setFormat}
+                          options={[
+                            { value: "knockout", label: "Knockout only" },
+                            ...(getSport(sportId).supportsGroups ? [{ value: "groups", label: "Groups + Knockout" }] : []),
+                          ]} />
+                      </div>
+                    </label>
+                  ) : (
+                    <label className="text-xs">
+                      Format
+                      <div className="mt-1 px-3 py-2 rounded-xl border field text-white/70" style={{ borderColor: TM_BLUE }}>Round Robin (Free tier)</div>
+                    </label>
+                  )}
                 </div>
 
-                {format === "groups" && (
+                {isPaid && format === "groups" && (
                   <div className="grid grid-cols-2 gap-3 mb-3">
                     <label className="text-xs">
                       Number of groups
@@ -1414,7 +1456,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       ) : (
         <section className="border rounded-2xl p-4 text-sm glass" style={{ borderColor: TM_BLUE }}>
-          Viewer mode. Please <button className="underline" onClick={() => setShowLogin(true)}>login as Admin</button> to access SCHEDULE.
+          Please <button className="underline" onClick={() => setTab("dashboard")}>log in</button> to access SCHEDULE.
         </section>
       ))}
 
@@ -1423,7 +1465,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         <section>
           {activeTournaments.length === 0 && (
             <p className="text-white/80 text-sm">
-              No active tournaments. {isAdmin ? <>Create one from <b>SCHEDULE</b>.</> : <>Ask an admin to create one.</>}
+              No active tournaments yet. Create one from <b>SCHEDULE</b>.
             </p>
           )}
 
@@ -1444,7 +1486,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 subtitle={`Active • ${sport.label} • ${tn.teams.length} players`}
                 right={
                   <>
-                    {isAdmin && (
+                    {isLoggedIn && (
                       <button className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => openDeleteModal(tn.id)} title="Delete tournament">
                         Delete
                       </button>
@@ -1452,13 +1494,13 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                     <button className="px-2 py-1 rounded border hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => exportTournamentToPDF(tn)}>Export PDF</button>
                     <button className="px-2 py-1 rounded border hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => exportTournamentToExcel(tn)}>Export Excel</button>
                     {ko.length > 0 && <span className="text-xs text-white/70">Current: {stageShort(counts.get(mr) || 0)}</span>}
-                    {isAdmin && canKO && (
+                    {isPaid && canKO && (
                       <button className="px-3 py-2 rounded-xl border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
                         onClick={() => generateKnockoutFromGroups(tn.id)}>
                         Generate Knockout Bracket
                       </button>
                     )}
-                    {isAdmin && ko.length > 0 && (
+                    {isLoggedIn && ko.length > 0 && (
                       <button
                         className={`px-3 py-2 rounded-xl border transition ${canNext ? "border-white hover:bg-white hover:text-black" : "border-zinc-700 text-zinc-500 cursor-not-allowed"}`}
                         disabled={!canNext}
@@ -1487,9 +1529,9 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                                 teamMap={teamMap}
                                 sport={sport}
                                 stageText="Grp"
-                                onPickWinner={(mid, wid) => (isAdmin ? pickWinner(tn.id, mid, wid) : null)}
-                                onUpdateGames={(mid, games) => (isAdmin ? updateMatchGames(tn.id, mid, games) : null)}
-                                canEdit={isAdmin}
+                                onPickWinner={(mid, wid) => (isLoggedIn ? pickWinner(tn.id, mid, wid) : null)}
+                                onUpdateGames={(mid, games) => (isLoggedIn ? updateMatchGames(tn.id, mid, games) : null)}
+                                canEdit={isLoggedIn}
                               />
                             ))}
                           </div>
@@ -1510,9 +1552,9 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                         teamMap={teamMap}
                         sport={sport}
                         stageText={stageShort(roundCounts(tn).get(m.round) || 0)}
-                        onPickWinner={(mid, wid) => (isAdmin ? pickWinner(tn.id, mid, wid) : null)}
-                        onUpdateGames={(mid, games) => (isAdmin ? updateMatchGames(tn.id, mid, games) : null)}
-                        canEdit={isAdmin}
+                        onPickWinner={(mid, wid) => (isLoggedIn ? pickWinner(tn.id, mid, wid) : null)}
+                        onUpdateGames={(mid, games) => (isLoggedIn ? updateMatchGames(tn.id, mid, games) : null)}
+                        canEdit={isLoggedIn}
                       />
                     ))}
                   </div>
@@ -1526,13 +1568,11 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
       {/* STANDINGS */}
       {tab === "standings" && (
         <section>
-          {tournaments.length === 0 && (
-            <p className="text-white/80 text-sm">
-              No tournaments yet. {isAdmin ? <>Create one from <b>SCHEDULE</b>.</> : <>Ask an admin to create one.</>}
-            </p>
+          {myTournaments.length === 0 && (
+            <p className="text-white/80 text-sm">No tournaments yet. Create one from <b>SCHEDULE</b>.</p>
           )}
 
-          {tournaments.map((tn) => {
+          {myTournaments.map((tn) => {
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
             const sport = getSport(tn.sport);
             const isGroupFmt = tn.format === "groups";
@@ -1553,7 +1593,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 key={tn.id}
                 title={tn.name}
                 subtitle={subtitle}
-                right={isAdmin ? (
+                right={isLoggedIn ? (
                   <button className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => openDeleteModal(tn.id)} title="Delete tournament">
                     Delete
                   </button>
@@ -1613,7 +1653,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 key={tn.id}
                 title={tn.name}
                 subtitle={`Champion: ${championName}`}
-                right={isAdmin ? (
+                right={isLoggedIn ? (
                   <button className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => openDeleteModal(tn.id)} title="Delete tournament">
                     Delete
                   </button>
@@ -1648,12 +1688,12 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
       )}
 
       {/* DELETED */}
-      {tab === "deleted" && (isAdmin ? (
+      {tab === "deleted" && (isLoggedIn ? (
         <section>
-          {deletedTournaments.length === 0 ? (
+          {myDeletedTournaments.length === 0 ? (
             <p className="text-white/80 text-sm">No deleted tournaments.</p>
           ) : (
-            deletedTournaments.map((tn) => {
+            myDeletedTournaments.map((tn) => {
               const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
               const subtitle = `Deleted: ${timeStr(tn.deletedAt)} • Created: ${timeStr(tn.createdAt)} • Players: ${tn.teams.length}`;
               return (
@@ -1693,11 +1733,116 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       ) : (
         <section className="border rounded-2xl p-4 text-sm glass" style={{ borderColor: TM_BLUE }}>
-          Viewer mode. Please <button className="underline" onClick={() => setShowLogin(true)}>login as Admin</button> to access DELETED.
+          Please <button className="underline" onClick={() => setTab("dashboard")}>log in</button> to access DELETED.
         </section>
       ))}
 
-      <footer className="fixed bottom-3 right-3 sm:bottom-4 sm:right-6 text-lg sm:text-2xl font-bold text-white/80">CV ENGG TML</footer>
+      {/* EXPLORE */}
+      {tab === "explore" && (
+        <section className="border rounded-2xl p-6 text-center glass" style={{ borderColor: TM_BLUE }}>
+          <h2 className="text-xl font-semibold mb-2">Public tournament browsing is coming soon</h2>
+          <p className="text-sm text-white/70 max-w-md mx-auto">
+            In a future update, organizers will be able to publish a tournament with a shareable link so
+            anyone can follow live scores and standings without an account — like the participant
+            registration links, this is on the roadmap but not built yet.
+          </p>
+        </section>
+      )}
+
+      {/* ADMIN (super admin only) */}
+      {tab === "admin" && (isSuperAdmin ? (
+        <section className="space-y-4">
+          <div className="border rounded-2xl p-3 sm:p-4 glass" style={{ borderColor: TM_BLUE }}>
+            <h2 className="font-semibold mb-3">Users</h2>
+            {profilesLoading ? (
+              <p className="text-sm text-white/70">Loading…</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs sm:text-sm border-collapse">
+                  <thead>
+                    <tr className="text-left text-white/60 border-b" style={{ borderColor: "rgba(255,255,255,0.15)" }}>
+                      <th className="py-1 pr-2">Name</th>
+                      <th className="py-1 pr-2">Email</th>
+                      <th className="py-1 pr-2">Role</th>
+                      <th className="py-1 pr-2">Tier</th>
+                      <th className="py-1 pr-2">Tournaments</th>
+                      <th className="py-1 pr-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {profiles.map((p) => {
+                      const ownedCount = tournaments.filter((t) => t.ownerId === p.id).length;
+                      return (
+                        <tr key={p.id} className="border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                          <td className="py-1 pr-2">{p.display_name || "—"}</td>
+                          <td className="py-1 pr-2">{p.email}</td>
+                          <td className="py-1 pr-2">{p.role}</td>
+                          <td className="py-1 pr-2">{p.tier}</td>
+                          <td className="py-1 pr-2">{ownedCount}</td>
+                          <td className="py-1 pr-2">
+                            {p.role !== "super_admin" && (
+                              p.tier === "paid" ? (
+                                <button className="px-2 py-1 rounded border border-zinc-400 text-zinc-200 hover:bg-zinc-200 hover:text-black"
+                                  onClick={() => adminSetTier(p.id, "free").then(() => adminListProfiles().then(setProfiles))}>
+                                  Revoke to Free
+                                </button>
+                              ) : (
+                                <button className="px-2 py-1 rounded border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
+                                  onClick={() => adminSetTier(p.id, "paid").then(() => adminListProfiles().then(setProfiles))}>
+                                  Grant Paid
+                                </button>
+                              )
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="border rounded-2xl p-3 sm:p-4 glass" style={{ borderColor: TM_BLUE }}>
+            <h2 className="font-semibold mb-3">All Tournaments (every organizer)</h2>
+            {tournaments.length === 0 ? (
+              <p className="text-sm text-white/70">No tournaments yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs sm:text-sm border-collapse">
+                  <thead>
+                    <tr className="text-left text-white/60 border-b" style={{ borderColor: "rgba(255,255,255,0.15)" }}>
+                      <th className="py-1 pr-2">Name</th>
+                      <th className="py-1 pr-2">Owner</th>
+                      <th className="py-1 pr-2">Sport</th>
+                      <th className="py-1 pr-2">Format</th>
+                      <th className="py-1 pr-2">Status</th>
+                      <th className="py-1 pr-2">Players</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tournaments.map((t) => {
+                      const owner = profiles.find((p) => p.id === t.ownerId);
+                      return (
+                        <tr key={t.id} className="border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                          <td className="py-1 pr-2">{t.name}</td>
+                          <td className="py-1 pr-2">{owner?.email || t.ownerId}</td>
+                          <td className="py-1 pr-2">{getSport(t.sport).label}</td>
+                          <td className="py-1 pr-2">{t.format}</td>
+                          <td className="py-1 pr-2">{t.status}</td>
+                          <td className="py-1 pr-2">{t.teams?.length ?? 0}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
+      ) : (
+        <section className="border rounded-2xl p-4 text-sm glass" style={{ borderColor: TM_BLUE }}>Admin only.</section>
+      ))}
     </div>
   );
 }

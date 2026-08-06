@@ -1,5 +1,6 @@
-// Base URL of the Vercel project that hosts /api/admin-login and /api/tournaments.
-// The frontend stays on GitHub Pages; only the two write/auth endpoints live on
-// Vercel (see README.md "Deploying" for the one-time setup). Update this after
-// you create the Vercel project — it prints the URL on first deploy.
-export const API_BASE = "https://REPLACE-WITH-YOUR-VERCEL-PROJECT.vercel.app";
+// Supabase project connection details. The anon key is safe to expose
+// client-side (unlike the old JSONBin master key) — Row-Level Security in
+// the database is what actually enforces access control, not key secrecy.
+// Get both from your Supabase project: Settings -> API.
+export const SUPABASE_URL = "https://REPLACE-WITH-YOUR-PROJECT.supabase.co";
+export const SUPABASE_ANON_KEY = "REPLACE-WITH-YOUR-ANON-KEY";

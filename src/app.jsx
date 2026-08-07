@@ -28,9 +28,12 @@ import { ACCENT, ACCENT_SECONDARY } from "./theme";
 
 /**
  * FixtureForge — Multi-Sport Tournament Maker
- * Tabs: DASHBOARD, SCHEDULE, FIXTURES, STANDINGS, WINNERS, DELETED (all
- * scoped to the signed-in organizer's own tournaments), EXPLORE (public,
- * placeholder), ADMIN (super admin only — cross-organizer oversight).
+ * Tabs: DASHBOARD, FIXTURES (Active/Completed toggle — read-only bracket +
+ * group views, plus a champion summary for completed ones), MANAGE
+ * (Setup/Results toggle — tournament creation and all score/winner entry,
+ * plus an archived-tournaments section), all scoped to the signed-in
+ * organizer's own tournaments. ADMIN is super admin only — cross-organizer
+ * oversight.
  */
 
 const TM_BLUE = ACCENT; // kept as an alias so the many existing borderColor:TM_BLUE references pick up the new palette
@@ -576,18 +579,25 @@ function DarkSelect({
 }
 
 /* ---------------- UI bits ---------------- */
-function TabButton({ id, label, tab, setTab }) {
+const TAB_ICONS = {
+  home: <path d="M12 3.2 3 10.5V21h6v-6h6v6h6V10.5L12 3.2z" />,
+  bracket: <path d="M4 5h4v3H4V5zm0 11h4v3H4v-3zM4 10h4v4H4v-4zm6-3.5h4v1.5h3v2h-3v3.5h3v2h-3v3.5h-4v-2h2v-3.5h-2v-2h2V8h-2V6.5zM17 5h3v3h-3V5zm0 11h3v3h-3v-3z" />,
+  manage: <path d="M11 2 4 6v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6l-7-4zm0 4.2 5 2.9v3.9c0 3.4-2.1 6.2-5 7.2-2.9-1-5-3.8-5-7.2V9.1l5-2.9zM10 15l-2.5-2.5L9 11l1 1 3-3 1.4 1.4L10 15z" />,
+  admin: <path d="M12 2 4 5v6.5c0 5 3.4 9.4 8 10.5 4.6-1.1 8-5.5 8-10.5V5l-8-3zm0 9.9h6c-.5 3.4-2.7 6.4-6 7.5V12H6V6.3l6-2.2v7.8z" />,
+};
+function TabButton({ id, label, icon, tab, setTab }) {
   const active = tab === id;
   return (
     <button
       onClick={() => setTab(id)}
-      className="px-3 py-2 rounded-xl border transition hover:opacity-90"
+      className="flex items-center gap-1.5 px-3 py-2 rounded-full text-sm font-medium transition"
       style={{
-        borderColor: TM_BLUE,
-        backgroundColor: active ? TM_BLUE : "transparent",
-        color: "white",
+        backgroundColor: active ? ACCENT : "rgba(255,255,255,0.06)",
+        color: active ? "#fff" : "rgba(255,255,255,0.75)",
+        boxShadow: active ? `0 0 0 1px ${ACCENT}` : "0 0 0 1px rgba(255,255,255,0.08)",
       }}
     >
+      {icon && <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0" fill="currentColor" aria-hidden="true">{TAB_ICONS[icon]}</svg>}
       {label}
     </button>
   );
@@ -860,6 +870,12 @@ export default function TournamentMaker() {
   // FIXTURES tab: which group is currently drilled into, per tournament ({ [tournamentId]: groupId })
   const [selectedGroupByTournament, setSelectedGroupByTournament] = useState({});
 
+  // Consolidated nav: MANAGE toggles Setup (was SCHEDULE) / Results (was
+  // STANDINGS); FIXTURES toggles Active (was FIXTURES) / Completed (was
+  // WINNERS). Fewer top-level tabs, same functionality underneath.
+  const [manageView, setManageView] = useState("setup"); // "setup" | "results"
+  const [fixturesView, setFixturesView] = useState("active"); // "active" | "completed"
+
   // Builder state
   const [tName, setTName] = useState("");
   const [targetTournamentId, setTargetTournamentId] = useState(NEW_TOURNEY_SENTINEL);
@@ -1119,7 +1135,7 @@ export default function TournamentMaker() {
   }
   function deleteForever(tournamentId) {
     if (!isLoggedIn) return alert("Please log in first.");
-    const ok = window.confirm("Permanently delete this tournament from DELETED?\nThis cannot be undone.");
+    const ok = window.confirm("Permanently delete this tournament from the archive?\nThis cannot be undone.");
     if (!ok) return;
     setDeletedTournaments((prev) => prev.filter((t) => t.id !== tournamentId));
   }
@@ -1261,17 +1277,13 @@ export default function TournamentMaker() {
 
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-3 mb-3 sm:mb-4">
         <div className="flex flex-wrap gap-2">
-          <TabButton id="dashboard" label="DASHBOARD" tab={tab} setTab={setTab} />
-          {isLoggedIn && <TabButton id="schedule" label="SCHEDULE" tab={tab} setTab={setTab} />}
-          {isLoggedIn && <TabButton id="fixtures" label="FIXTURES" tab={tab} setTab={setTab} />}
-          {isLoggedIn && <TabButton id="standings" label="STANDINGS" tab={tab} setTab={setTab} />}
-          {isLoggedIn && <TabButton id="winners" label="WINNERS" tab={tab} setTab={setTab} />}
-          {isLoggedIn && <TabButton id="deleted" label="DELETED" tab={tab} setTab={setTab} />}
-          <TabButton id="explore" label="EXPLORE" tab={tab} setTab={setTab} />
-          {isSuperAdmin && <TabButton id="admin" label="ADMIN" tab={tab} setTab={setTab} />}
+          <TabButton id="dashboard" label="Dashboard" icon="home" tab={tab} setTab={setTab} />
+          {isLoggedIn && <TabButton id="fixtures" label="Fixtures" icon="bracket" tab={tab} setTab={setTab} />}
+          {isLoggedIn && <TabButton id="manage" label="Manage" icon="manage" tab={tab} setTab={setTab} />}
+          {isSuperAdmin && <TabButton id="admin" label="Admin" icon="admin" tab={tab} setTab={setTab} />}
         </div>
         <div className="flex flex-wrap gap-2 items-center">
-          {(tab === "fixtures" || tab === "deleted") && isLoggedIn && (
+          {(tab === "fixtures" || tab === "manage") && isLoggedIn && (
             <button className="px-3 py-2 border rounded hover:opacity-90" style={{ borderColor: TM_BLUE }} onClick={saveAll}>Save</button>
           )}
           {isLoggedIn && (
@@ -1306,7 +1318,7 @@ export default function TournamentMaker() {
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-3">
           <div className="w-full max-w-md border rounded-2xl p-4 glass" style={{ borderColor: TM_BLUE }}>
             <h3 className="font-semibold mb-2">Confirm Delete</h3>
-            <p className="text-sm text-white/80 mb-3">Are you sure? It will be moved to the <b>DELETED</b> tab (not permanently erased).</p>
+            <p className="text-sm text-white/80 mb-3">Are you sure? It will be moved to the archive in <b>Manage</b> (not permanently erased).</p>
             <div className="flex flex-wrap gap-2 justify-end">
               <button className="px-3 py-2 border rounded border-zinc-400 text-zinc-200 hover:bg-zinc-200 hover:text-black" onClick={cancelDelete}>Cancel</button>
               <button className="px-3 py-2 border rounded border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={confirmDelete}>Delete</button>
@@ -1343,7 +1355,7 @@ export default function TournamentMaker() {
                 <div className="text-xs text-white/60">Plan</div>
               </div>
             </div>
-            <button className="px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black" onClick={() => setTab("schedule")}>
+            <button className="px-4 py-2 border border-emerald-400 text-emerald-300 rounded hover:bg-emerald-400 hover:text-black" onClick={() => { setManageView("setup"); setTab("manage"); }}>
               Create a tournament
             </button>
           </section>
@@ -1362,8 +1374,21 @@ export default function TournamentMaker() {
         )
       )}
 
-      {/* SCHEDULE */}
-      {tab === "schedule" && (isLoggedIn ? (
+      {/* MANAGE (Setup = was SCHEDULE, Results = was STANDINGS) */}
+      {tab === "manage" && isLoggedIn && (
+        <div className="flex mb-3 sm:mb-4 rounded-full overflow-hidden w-fit" style={{ boxShadow: `0 0 0 1px ${ACCENT}` }}>
+          <button onClick={() => setManageView("setup")} className="px-4 py-1.5 text-sm font-semibold transition"
+            style={{ backgroundColor: manageView === "setup" ? ACCENT : "transparent", color: "#fff" }}>
+            Setup
+          </button>
+          <button onClick={() => setManageView("results")} className="px-4 py-1.5 text-sm font-semibold transition"
+            style={{ backgroundColor: manageView === "results" ? ACCENT : "transparent", color: "#fff" }}>
+            Results
+          </button>
+        </div>
+      )}
+
+      {tab === "manage" && manageView === "setup" && (isLoggedIn ? (
         <section className="grid md:grid-cols-2 gap-3 sm:gap-4">
           <div className="border rounded-2xl p-3 sm:p-4 glass" style={{ borderColor: TM_BLUE }}>
             <h2 className="font-semibold mb-3">Tournament Setup</h2>
@@ -1535,16 +1560,29 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       ) : (
         <section className="border rounded-2xl p-4 text-sm glass" style={{ borderColor: TM_BLUE }}>
-          Please <button className="underline" onClick={() => setTab("dashboard")}>log in</button> to access SCHEDULE.
+          Please <button className="underline" onClick={() => setTab("dashboard")}>log in</button> to manage tournaments.
         </section>
       ))}
 
-      {/* FIXTURES */}
-      {tab === "fixtures" && (
+      {/* FIXTURES (Active = original FIXTURES, Completed = was WINNERS) */}
+      {tab === "fixtures" && isLoggedIn && (
+        <div className="flex mb-3 sm:mb-4 rounded-full overflow-hidden w-fit" style={{ boxShadow: `0 0 0 1px ${ACCENT}` }}>
+          <button onClick={() => setFixturesView("active")} className="px-4 py-1.5 text-sm font-semibold transition"
+            style={{ backgroundColor: fixturesView === "active" ? ACCENT : "transparent", color: "#fff" }}>
+            Active
+          </button>
+          <button onClick={() => setFixturesView("completed")} className="px-4 py-1.5 text-sm font-semibold transition"
+            style={{ backgroundColor: fixturesView === "completed" ? ACCENT : "transparent", color: "#fff" }}>
+            Completed
+          </button>
+        </div>
+      )}
+
+      {tab === "fixtures" && fixturesView === "active" && (
         <section>
           {activeTournaments.length === 0 && (
             <p className="text-white/80 text-sm">
-              No active tournaments yet. Create one from <b>SCHEDULE</b>.
+              No active tournaments yet. Create one from <b>Manage</b>.
             </p>
           )}
 
@@ -1635,11 +1673,10 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
-      {/* STANDINGS */}
-      {tab === "standings" && (
+      {tab === "manage" && manageView === "results" && (
         <section>
           {myTournaments.length === 0 && (
-            <p className="text-white/80 text-sm">No tournaments yet. Create one from <b>SCHEDULE</b>.</p>
+            <p className="text-white/80 text-sm">No tournaments yet. Create one from the <b>Setup</b> tab above.</p>
           )}
 
           {myTournaments.map((tn) => {
@@ -1776,10 +1813,10 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
-      {/* WINNERS */}
-      {tab === "winners" && (
+      {/* Completed tournaments (was WINNERS, now the "Completed" toggle inside FIXTURES) */}
+      {tab === "fixtures" && fixturesView === "completed" && (
         <section>
-          {completedTournaments.length === 0 && <p className="text-white/80 text-sm">No completed tournaments yet. Finish one in <b>FIXTURES</b>.</p>}
+          {completedTournaments.length === 0 && <p className="text-white/80 text-sm">No completed tournaments yet.</p>}
           {completedTournaments.map((tn) => {
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
             const byRound = new Map();
@@ -1827,11 +1864,12 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
         </section>
       )}
 
-      {/* DELETED */}
-      {tab === "deleted" && (isLoggedIn ? (
-        <section>
+      {/* Archive (was its own DELETED tab, now folded into the bottom of Manage) */}
+      {tab === "manage" && isLoggedIn && (
+        <section className="mt-6">
+          <h3 className="text-sm font-semibold text-white/60 mb-2">Archived tournaments{myDeletedTournaments.length > 0 ? ` (${myDeletedTournaments.length})` : ""}</h3>
           {myDeletedTournaments.length === 0 ? (
-            <p className="text-white/80 text-sm">No deleted tournaments.</p>
+            <p className="text-white/50 text-xs">Deleted tournaments show up here and can be restored.</p>
           ) : (
             myDeletedTournaments.map((tn) => {
               const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
@@ -1870,22 +1908,6 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
               );
             })
           )}
-        </section>
-      ) : (
-        <section className="border rounded-2xl p-4 text-sm glass" style={{ borderColor: TM_BLUE }}>
-          Please <button className="underline" onClick={() => setTab("dashboard")}>log in</button> to access DELETED.
-        </section>
-      ))}
-
-      {/* EXPLORE */}
-      {tab === "explore" && (
-        <section className="border rounded-2xl p-6 text-center glass" style={{ borderColor: TM_BLUE }}>
-          <h2 className="text-xl font-semibold mb-2">Public tournament browsing is coming soon</h2>
-          <p className="text-sm text-white/70 max-w-md mx-auto">
-            In a future update, organizers will be able to publish a tournament with a shareable link so
-            anyone can follow live scores and standings without an account — like the participant
-            registration links, this is on the roadmap but not built yet.
-          </p>
         </section>
       )}
 

@@ -56,6 +56,23 @@ function uniqueNames(arr) {
   }
   return out;
 }
+// Parses bulk-entry text into [{name, roster}]. When isTeamEntry, each line
+// is "Team Name: Player 1, Player 2, ..." (first colon splits the team's
+// display name from its roster); otherwise each line is just one player's
+// name with an empty roster. Roster is display metadata only — the bracket
+// and scoring engines only ever see one entrant vs another, regardless of
+// how many names are behind it.
+function parseEntryLines(text, isTeamEntry) {
+  const lines = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  if (!isTeamEntry) return lines.map((name) => ({ name, roster: [] }));
+  return lines.map((line) => {
+    const idx = line.indexOf(":");
+    if (idx === -1) return { name: line, roster: [] };
+    const name = line.slice(0, idx).trim() || line;
+    const roster = line.slice(idx + 1).split(",").map((s) => s.trim()).filter(Boolean);
+    return { name, roster };
+  });
+}
 function findDuplicateNamesCaseInsensitive(arr) {
   const seen = new Map();
   const dups = new Set();
@@ -708,9 +725,11 @@ function ResultPicker({ value, aName, bName, disabled, onChange }) {
   );
 }
 
-function MatchRow({ idx, m, teamMap, onPickWinner, onUpdateGames, onUpdateScore, onUpdateResult, sport, stageText, canEdit }) {
+function MatchRow({ idx, m, teamMap, rosterMap, onPickWinner, onUpdateGames, onUpdateScore, onUpdateResult, sport, stageText, canEdit }) {
   const aName = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
   const bName = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
+  const aRoster = rosterMap?.[m.aId] || [];
+  const bRoster = rosterMap?.[m.bId] || [];
   const bothEmpty = !m.aId && !m.bId;
   const singleBye = (!!m.aId && !m.bId) || (!m.aId && !!m.bId);
   const usesGames = sport?.matchModel === "games" && !bothEmpty && !singleBye;
@@ -724,9 +743,15 @@ function MatchRow({ idx, m, teamMap, onPickWinner, onUpdateGames, onUpdateScore,
       <span className="text-zinc-400 sm:w-24">
         {stageText}{stageText === "F" ? "" : <> • M{idx}</>}
       </span>
-      <div className={`flex-1 ${aEliminated ? "line-through text-white/40" : ""}`}>{aName}</div>
+      <div className="flex-1">
+        <div className={aEliminated ? "line-through text-white/40" : ""}>{aName}</div>
+        {aRoster.length > 0 && <div className="text-[10px] text-white/40 truncate">{aRoster.join(", ")}</div>}
+      </div>
       {!bothEmpty && !singleBye && <span className="hidden sm:inline">vs</span>}
-      <div className={`flex-1 ${bEliminated ? "line-through text-white/40" : ""}`}>{bName}</div>
+      <div className="flex-1">
+        <div className={bEliminated ? "line-through text-white/40" : ""}>{bName}</div>
+        {bRoster.length > 0 && <div className="text-[10px] text-white/40 truncate">{bRoster.join(", ")}</div>}
+      </div>
 
       {usesGames ? (
         canEdit ? (
@@ -979,6 +1004,7 @@ export default function TournamentMaker() {
   const [seed4, setSeed4] = useState("");
   const [builderTeams, setBuilderTeams] = useState([]);
   const [sportId, setSportId] = useState("generic");
+  const [squadFormatId, setSquadFormatId] = useState("individual");
   const [format, setFormat] = useState("knockout"); // "knockout" | "groups"
   const [numGroups, setNumGroups] = useState(2);
   const [advancePerGroup, setAdvancePerGroup] = useState(2);
@@ -1022,6 +1048,13 @@ export default function TournamentMaker() {
     setFormat("groups"); setNumGroups(1); setAdvancePerGroup(1);
   }, [isPaid]);
 
+  // Squad-format ids are sport-specific (e.g. "singles" doesn't exist for
+  // football) — reset to that sport's default whenever the sport changes.
+  useEffect(() => {
+    const formats = getSport(sportId).squadFormats || [];
+    setSquadFormatId(formats[0]?.id || "individual");
+  }, [sportId]);
+
   useEffect(() => {
     if (!isSuperAdmin || tab !== "admin") return;
     setProfilesLoading(true);
@@ -1042,19 +1075,28 @@ export default function TournamentMaker() {
     [builderTeams]
   );
 
+  // Whether the currently-selected sport+squad-type means each entrant is
+  // a multi-person team/pair rather than a single player.
+  function isTeamEntryFor(sId, sqId) {
+    const sf = (getSport(sId).squadFormats || []).find((f) => f.id === sqId);
+    return (sf?.size || 1) > 1;
+  }
+
   function loadTeamsFromText() {
     if (!isLoggedIn) return alert("Please log in first.");
-    const lines = namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    const uniq = Array.from(new Set(lines));
-    const dups = findDuplicateNamesCaseInsensitive(lines);
+    const entries = parseEntryLines(namesText, isTeamEntryFor(sportId, squadFormatId));
+    const names = entries.map((e) => e.name);
+    const dups = findDuplicateNamesCaseInsensitive(names);
     if (dups.length > 0) {
       alert("Duplicate names found:\n\n" + dups.map((n) => `• ${n}`).join("\n") + "\n\nPlease fix and try again.");
       return;
     }
-    const teams = uniq.map((n) => ({ id: uid(), name: n }));
+    const seenExact = new Set();
+    const uniqEntries = entries.filter((e) => { if (seenExact.has(e.name)) return false; seenExact.add(e.name); return true; });
+    const teams = uniqEntries.map((e) => ({ id: uid(), name: e.name, roster: e.roster }));
     setBuilderTeams(teams);
     if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
-      setSeed1(uniq[0] || ""); setSeed2(uniq[1] || ""); setSeed3(uniq[2] || ""); setSeed4(uniq[3] || "");
+      setSeed1(uniqEntries[0]?.name || ""); setSeed2(uniqEntries[1]?.name || ""); setSeed3(uniqEntries[2]?.name || ""); setSeed4(uniqEntries[3]?.name || "");
     }
   }
 
@@ -1073,7 +1115,11 @@ export default function TournamentMaker() {
       alert("Duplicate names found in uploaded file:\n\n" + dups.map((n) => `• ${n}`).join("\n") + "\n\nPlease fix and re-upload.");
       return;
     }
-    const teams = names.map((n) => ({ id: uid(), name: n }));
+    // File upload always fills the "Players" column as the entrant's
+    // display name only — no roster column support yet, so team-entry
+    // sports get an empty roster from this path (still fully usable, just
+    // without member names attached; use the text box below for that).
+    const teams = names.map((n) => ({ id: uid(), name: n, roster: [] }));
     setBuilderTeams(teams);
     if (targetTournamentId === NEW_TOURNEY_SENTINEL) {
       setSeed1(names[0] || ""); setSeed2(names[1] || ""); setSeed3(names[2] || ""); setSeed4(names[3] || "");
@@ -1294,20 +1340,22 @@ export default function TournamentMaker() {
     setDeletedTournaments((prev) => prev.filter((t) => t.id !== tournamentId));
   }
 
-  function applyEntriesToTournament(tournamentId, newNames) {
+  function applyEntriesToTournament(tournamentId, newEntries) {
     if (!isLoggedIn) return alert("Please log in first.");
+    const newNames = newEntries.map((e) => e.name);
     const dups = findDuplicateNamesCaseInsensitive(newNames);
     if (dups.length > 0) {
       alert("Duplicate names found:\n\n" + dups.map((n) => `• ${n}`).join("\n") + "\n\nPlease remove duplicates and try again.");
       return;
     }
+    const rosterByName = new Map(newEntries.map((e) => [e.name, e.roster || []]));
     setTournaments((prev) => prev.map((tn) => {
       if (tn.id !== tournamentId) return tn;
       const maxR = maxRound(tn); if (maxR > 1) { alert("Cannot add entries after Round 1."); return tn; }
       const existingNamesSet = new Set(tn.teams.map((t) => t.name.toLowerCase()));
       const toAddNames = uniqueNames(newNames).filter((n) => !existingNamesSet.has(n.toLowerCase()));
       if (toAddNames.length === 0) return tn;
-      const newTeams = toAddNames.map((n) => ({ id: uid(), name: n }));
+      const newTeams = toAddNames.map((n) => ({ id: uid(), name: n, roster: rosterByName.get(n) || [] }));
       const allTeams = [...tn.teams, ...newTeams];
       const idByName = Object.fromEntries(allTeams.map((t) => [t.name, t.id]));
       let matches = tn.matches.map((m) => ({ ...m }));
@@ -1337,8 +1385,12 @@ export default function TournamentMaker() {
   function createTournament() {
     if (!isLoggedIn) return alert("Please log in first.");
     if (targetTournamentId !== NEW_TOURNEY_SENTINEL) {
-      const names = builderTeams.length ? builderTeams.map((b) => b.name) : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-      applyEntriesToTournament(targetTournamentId, names);
+      const targetTn = myTournaments.find((t) => t.id === targetTournamentId);
+      const isTeamEntry = targetTn ? isTeamEntryFor(targetTn.sport, targetTn.squadFormat) : false;
+      const entries = builderTeams.length
+        ? builderTeams.map((b) => ({ name: b.name, roster: b.roster || [] }))
+        : parseEntryLines(namesText, isTeamEntry);
+      applyEntriesToTournament(targetTournamentId, entries);
       return;
     }
     if (!tName.trim()) return alert("Please enter a Tournament Name.");
@@ -1363,7 +1415,7 @@ export default function TournamentMaker() {
 
       const tourney = {
         id: uuid(), ownerId: user.id, name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active",
-        sport: sportId, format: "groups", groups, groupStage: { advancePerGroup: advance, complete: false },
+        sport: sportId, squadFormat: squadFormatId, format: "groups", groups, groupStage: { advancePerGroup: advance, complete: false },
         championId: null,
       };
       setTournaments((prev) => [tourney, ...prev]);
@@ -1384,7 +1436,7 @@ export default function TournamentMaker() {
     const seedTopId = builderTeamMap[seed1], seedBottomId = builderTeamMap[seed2];
     const seed3Id = picked.length === 4 ? builderTeamMap[seed3] : null, seed4Id = picked.length === 4 ? builderTeamMap[seed4] : null;
 
-    const tourney = { id: uuid(), ownerId: user.id, name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active", sport: sportId, format: "knockout", seedTopId, seedBottomId, seed3Id, seed4Id, championId: null };
+    const tourney = { id: uuid(), ownerId: user.id, name: tName.trim(), createdAt: Date.now(), teams: builderTeams, matches, status: "active", sport: sportId, squadFormat: squadFormatId, format: "knockout", seedTopId, seedBottomId, seed3Id, seed4Id, championId: null };
     setTournaments((prev) => [tourney, ...prev]);
 
     setTName(""); setNamesText(""); setSeed1(""); setSeed2(""); setSeed3(""); setSeed4(""); setBuilderTeams([]); setSportId("generic"); setFormat("knockout");
@@ -1619,16 +1671,35 @@ export default function TournamentMaker() {
                     </label>
                   </div>
                 )}
+
+                {(getSport(sportId).squadFormats || []).length > 1 && (
+                  <label className="text-xs block mb-3">
+                    Squad type
+                    <div className="mt-1">
+                      <DarkSelect value={squadFormatId} onChange={setSquadFormatId}
+                        options={getSport(sportId).squadFormats.map(f => ({ value: f.id, label: f.label }))} />
+                    </div>
+                  </label>
+                )}
               </>
             )}
 
-            <label className="text-xs block mb-2">Players (one per line)</label>
-            <textarea className="w-full h-40 field border rounded p-2 mb-2" style={{ borderColor: TM_BLUE }} placeholder={`Enter player names, one per line
-Example:
-Akhil
-Devi
-Rahul
-Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
+            {(() => {
+              const squadFormat = (getSport(sportId).squadFormats || []).find(f => f.id === squadFormatId);
+              const isTeamEntry = (squadFormat?.size || 1) > 1;
+              return (
+                <>
+                  <label className="text-xs block mb-2">
+                    {isTeamEntry ? `Teams (one per line — "${squadFormat.label}")` : "Players (one per line)"}
+                  </label>
+                  <textarea className="w-full h-40 field border rounded p-2 mb-2" style={{ borderColor: TM_BLUE }}
+                    placeholder={isTeamEntry
+                      ? `One team per line: Team Name: Player 1, Player 2, ...\nExample:\nRed Dragons: Akhil, Devi, Rahul, Meera, Sana\nBlue Falcons: Arjun, Priya, Kabir, Zoya, Ishaan`
+                      : `Enter player names, one per line\nExample:\nAkhil\nDevi\nRahul\nMeera`}
+                    value={namesText} onChange={(e) => setNamesText(e.target.value)} />
+                </>
+              );
+            })()}
 
             <div className="flex flex-col sm:flex-row sm:items-center gap-2 justify-between mb-2">
               <div>
@@ -1656,12 +1727,14 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 onClick={
                   targetTournamentId === NEW_TOURNEY_SENTINEL
                     ? loadTeamsFromText
-                    : () =>
-                        applyEntriesToTournament(
-                          targetTournamentId,
-                          builderTeams.length ? builderTeams.map((b) => b.name)
-                            : namesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
-                        )
+                    : () => {
+                        const targetTn = myTournaments.find((t) => t.id === targetTournamentId);
+                        const isTeamEntry = targetTn ? isTeamEntryFor(targetTn.sport, targetTn.squadFormat) : false;
+                        const entries = builderTeams.length
+                          ? builderTeams.map((b) => ({ name: b.name, roster: b.roster || [] }))
+                          : parseEntryLines(namesText, isTeamEntry);
+                        applyEntriesToTournament(targetTournamentId, entries);
+                      }
                 }
               >
                 Add Entries
@@ -1752,6 +1825,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
             const mr = maxRound(tn);
             const counts = roundCounts(tn);
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
+            const rosterMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.roster || []]));
             const sport = getSport(tn.sport);
             const isGroupFmt = tn.format === "groups";
             const ko = knockoutMatches(tn);
@@ -1809,6 +1883,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                                 idx={i + 1}
                                 m={m}
                                 teamMap={teamMap}
+                                rosterMap={rosterMap}
                                 sport={sport}
                                 stageText="Grp"
                                 onPickWinner={() => {}}
@@ -1845,6 +1920,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
 
           {myTournaments.map((tn) => {
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
+            const rosterMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.roster || []]));
             const sport = getSport(tn.sport);
             const isGroupFmt = tn.format === "groups";
             const ko = knockoutMatches(tn);
@@ -1934,6 +2010,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                               idx={i + 1}
                               m={m}
                               teamMap={teamMap}
+                              rosterMap={rosterMap}
                               sport={sport}
                               stageText="Grp"
                               onPickWinner={(mid, wid) => (isLoggedIn ? pickWinner(tn.id, mid, wid) : null)}
@@ -1961,6 +2038,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                               idx={i + 1}
                               m={m}
                               teamMap={teamMap}
+                              rosterMap={rosterMap}
                               sport={sport}
                               stageText={stageShort(arr.length)}
                               onPickWinner={(mid, wid) => (isLoggedIn ? pickWinner(tn.id, mid, wid) : null)}

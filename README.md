@@ -113,6 +113,29 @@ actually testable, rather than one huge unreviewable change:
 
 ## Sport engine
 
+### Squad type (singles/doubles/team size) and rosters
+
+An "entrant" in the bracket is always just one thing — one name that wins
+or loses — regardless of whether it represents one player or an eleven-a-side
+football team. Each sport in `src/sports/registry.js` lists its
+`squadFormats` (e.g. badminton: Singles/Doubles; football: 5/7/9/11-a-side;
+volleyball: Indoor 6/Beach 2; cricket: 11-a-side/8-a-side; chess: Individual
+only). When a sport has more than one option, a **Squad type** dropdown
+appears in Setup.
+
+For any squad type bigger than 1, the bulk-entry box switches from
+"one player per line" to **"one team per line: `Team Name: Player 1, Player
+2, ...`"** — the part before the first colon becomes the entrant's display
+name, everything after (comma-separated) becomes its roster. A line with no
+colon still works, it just has no roster attached. Roster is pure display
+metadata (shown as small subtext under the name in Fixtures/Standings) —
+the bracket, scoring, and standings engines never look at it, so this
+required no changes to `groupStage.js` or any `matchModel`. File upload
+(CSV/XLSX) doesn't support a roster column yet — uploaded entrants get an
+empty roster; use the text box for teams whose members you want recorded.
+
+### Match models
+
 Tournaments carry a `sport` id (`src/sports/registry.js`) and a `format`
 (`"knockout"` or `"groups"`). Existing tournaments with no `sport`/`format`
 field default to `sport: "generic"`, `format: "knockout"` — the original

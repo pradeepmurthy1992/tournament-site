@@ -666,14 +666,16 @@ function MatchRow({ idx, m, teamMap, onPickWinner, onUpdateGames, sport, stageTe
   const bothEmpty = !m.aId && !m.bId;
   const singleBye = (!!m.aId && !m.bId) || (!m.aId && !!m.bId);
   const usesGames = sport?.matchModel === "games" && !bothEmpty && !singleBye;
+  const aEliminated = m.winnerId && m.aId && m.winnerId !== m.aId;
+  const bEliminated = m.winnerId && m.bId && m.winnerId !== m.bId;
   return (
     <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-1 sm:gap-2 py-2 text-sm">
       <span className="text-zinc-400 sm:w-24">
         {stageText}{stageText === "F" ? "" : <> • M{idx}</>}
       </span>
-      <div className="flex-1">{aName}</div>
+      <div className={`flex-1 ${aEliminated ? "line-through text-white/40" : ""}`}>{aName}</div>
       {!bothEmpty && !singleBye && <span className="hidden sm:inline">vs</span>}
-      <div className="flex-1">{bName}</div>
+      <div className={`flex-1 ${bEliminated ? "line-through text-white/40" : ""}`}>{bName}</div>
 
       {usesGames ? (
         canEdit ? (
@@ -791,6 +793,55 @@ function GroupCard({ group, playerCount, played, total, selected, onClick }) {
         <div className="h-full rounded-full" style={{ width: `${pct}%`, background: complete ? ACCENT_SECONDARY : ACCENT }} />
       </div>
     </button>
+  );
+}
+
+// Single read-only match box for the visual bracket: two names stacked,
+// the eliminated side struck through, winner bolded. Unreached future
+// matches show "Winner of M#" placeholders (matchNo comes from
+// buildMatchNumbering, same sequential numbering the PDF export uses).
+function BracketMatchBox({ m, teamMap, childNos }) {
+  const aElim = m.winnerId && m.aId && m.winnerId !== m.aId;
+  const bElim = m.winnerId && m.bId && m.winnerId !== m.bId;
+  const isFuture = !m.aId && !m.bId && childNos;
+  const aName = m.aId ? (teamMap[m.aId] || "Unknown") : (isFuture ? `Winner of M${childNos[0] ?? "?"}` : "BYE/TBD");
+  const bName = m.bId ? (teamMap[m.bId] || "Unknown") : (isFuture ? `Winner of M${childNos[1] ?? "?"}` : "BYE/TBD");
+  return (
+    <div className="rounded-lg border px-2 py-1.5 text-[11px] w-36 sm:w-40 shrink-0"
+      style={{ borderColor: m.winnerId ? ACCENT_SECONDARY : "rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.03)" }}>
+      <div className={`truncate ${aElim ? "line-through text-white/35" : m.winnerId === m.aId ? "font-semibold" : isFuture ? "text-white/40 italic" : ""}`}>{aName}</div>
+      <div className="h-px my-1" style={{ background: "rgba(255,255,255,0.1)" }} />
+      <div className={`truncate ${bElim ? "line-through text-white/35" : m.winnerId === m.bId ? "font-semibold" : isFuture ? "text-white/40 italic" : ""}`}>{bName}</div>
+    </div>
+  );
+}
+
+// Full read-only knockout bracket: one column per round, horizontally
+// scrollable, each round's boxes evenly spaced across the tallest
+// column's height — a light-weight approximation of proper bracket
+// connectors without needing pixel-exact JS layout math.
+function KnockoutBracket({ tn, teamMap }) {
+  const rounds = buildProjectedRounds(tn);
+  if (!rounds.length) return <p className="text-sm text-white/60 px-1">No knockout matches yet.</p>;
+  const { childNosByParentIndex } = buildMatchNumbering(rounds);
+  return (
+    <div className="overflow-x-auto pb-2">
+      <div className="flex gap-5 items-stretch" style={{ width: "max-content" }}>
+        {rounds.map((r, ri) => (
+          <div key={r.round} className="flex flex-col justify-around gap-3">
+            <div className="text-center text-[10px] font-semibold text-white/60 uppercase tracking-wide">{stageShort(r.matches.length)}</div>
+            {r.matches.map((m, mi) => (
+              <BracketMatchBox
+                key={m.id}
+                m={m}
+                teamMap={teamMap}
+                childNos={ri > 0 ? childNosByParentIndex.get(`${ri}:${mi}`) : null}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1500,12 +1551,10 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
           {activeTournaments.map((tn) => {
             const mr = maxRound(tn);
             const counts = roundCounts(tn);
-            const canNext = canGenerateNext(tn);
             const teamMap = Object.fromEntries(tn.teams.map((tm) => [tm.id, tm.name]));
             const sport = getSport(tn.sport);
             const isGroupFmt = tn.format === "groups";
             const ko = knockoutMatches(tn);
-            const canKO = isGroupFmt && canGenerateKnockoutFromGroups(tn);
 
             return (
               <Collapsible
@@ -1522,21 +1571,6 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                     <button className="px-2 py-1 rounded border hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => exportTournamentToPDF(tn)}>Export PDF</button>
                     <button className="px-2 py-1 rounded border hover:bg-white hover:text-black" style={{ borderColor: TM_BLUE }} onClick={() => exportTournamentToExcel(tn)}>Export Excel</button>
                     {ko.length > 0 && <span className="text-xs text-white/70">Current: {stageShort(counts.get(mr) || 0)}</span>}
-                    {isPaid && canKO && (
-                      <button className="px-3 py-2 rounded-xl border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
-                        onClick={() => generateKnockoutFromGroups(tn.id)}>
-                        Generate Knockout Bracket
-                      </button>
-                    )}
-                    {isLoggedIn && ko.length > 0 && (
-                      <button
-                        className={`px-3 py-2 rounded-xl border transition ${canNext ? "border-white hover:bg-white hover:text-black" : "border-zinc-700 text-zinc-500 cursor-not-allowed"}`}
-                        disabled={!canNext}
-                        onClick={() => generateNextRound(tn.id)}
-                      >
-                        Generate Next Round
-                      </button>
-                    )}
                   </>
                 }
                 defaultOpen={true}
@@ -1546,7 +1580,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                   const activeGroup = tn.groups.find((g) => g.id === activeGroupId) || tn.groups[0];
                   const activeGroupMatches = activeGroup ? tn.matches.filter((m) => m.groupId === activeGroup.id) : [];
                   return (
-                    <div className="mb-4 max-w-xl">
+                    <div className="mb-4">
                       <div className="grid gap-1.5 mb-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(108px, 1fr))" }}>
                         {tn.groups.map((g) => {
                           const groupMatches = tn.matches.filter((m) => m.groupId === g.id);
@@ -1577,9 +1611,9 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                                 teamMap={teamMap}
                                 sport={sport}
                                 stageText="Grp"
-                                onPickWinner={(mid, wid) => (isLoggedIn ? pickWinner(tn.id, mid, wid) : null)}
-                                onUpdateGames={(mid, games) => (isLoggedIn ? updateMatchGames(tn.id, mid, games) : null)}
-                                canEdit={isLoggedIn}
+                                onPickWinner={() => {}}
+                                onUpdateGames={() => {}}
+                                canEdit={false}
                               />
                             ))}
                           </div>
@@ -1590,21 +1624,9 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                 })()}
 
                 {ko.length > 0 && (
-                  <div className="divide-y" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
-                    {isGroupFmt && <h4 className="font-semibold text-sm mb-1 pt-2">Knockout</h4>}
-                    {ko.map((m, i) => (
-                      <MatchRow
-                        key={m.id}
-                        idx={i + 1}
-                        m={m}
-                        teamMap={teamMap}
-                        sport={sport}
-                        stageText={stageShort(roundCounts(tn).get(m.round) || 0)}
-                        onPickWinner={(mid, wid) => (isLoggedIn ? pickWinner(tn.id, mid, wid) : null)}
-                        onUpdateGames={(mid, games) => (isLoggedIn ? updateMatchGames(tn.id, mid, games) : null)}
-                        canEdit={isLoggedIn}
-                      />
-                    ))}
+                  <div>
+                    {isGroupFmt && <h4 className="font-semibold text-sm mb-2">Knockout bracket</h4>}
+                    <KnockoutBracket tn={tn} teamMap={teamMap} />
                   </div>
                 )}
               </Collapsible>
@@ -1635,18 +1657,42 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
               : ko.length
                 ? `Active • Current: ${stageShort(currentCount)}`
                 : `Active • Group stage`;
+            const canNext = canGenerateNext(tn);
+            const canKO = isGroupFmt && canGenerateKnockoutFromGroups(tn);
+            const activeGroupId = selectedGroupByTournament[tn.id] || tn.groups?.[0]?.id;
+            const activeGroup = tn.groups?.find((g) => g.id === activeGroupId) || tn.groups?.[0];
+            const activeGroupMatches = activeGroup ? tn.matches.filter((m) => m.groupId === activeGroup.id) : [];
 
             return (
               <Collapsible
                 key={tn.id}
                 title={tn.name}
                 subtitle={subtitle}
-                right={isLoggedIn ? (
-                  <button className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => openDeleteModal(tn.id)} title="Delete tournament">
-                    Delete
-                  </button>
-                ) : null}
-                defaultOpen={false}
+                right={
+                  <>
+                    {isLoggedIn && (
+                      <button className="px-2 py-1 rounded border border-red-400 text-red-300 hover:bg-red-400 hover:text-black" onClick={() => openDeleteModal(tn.id)} title="Delete tournament">
+                        Delete
+                      </button>
+                    )}
+                    {isPaid && canKO && (
+                      <button className="px-3 py-2 rounded-xl border border-emerald-400 text-emerald-300 hover:bg-emerald-400 hover:text-black"
+                        onClick={() => generateKnockoutFromGroups(tn.id)}>
+                        Generate Knockout Bracket
+                      </button>
+                    )}
+                    {isLoggedIn && ko.length > 0 && (
+                      <button
+                        className={`px-3 py-2 rounded-xl border transition ${canNext ? "border-white hover:bg-white hover:text-black" : "border-zinc-700 text-zinc-500 cursor-not-allowed"}`}
+                        disabled={!canNext}
+                        onClick={() => generateNextRound(tn.id)}
+                      >
+                        Generate Next Round
+                      </button>
+                    )}
+                  </>
+                }
+                defaultOpen={true}
               >
                 {isGroupFmt && tn.groups.map((g) => {
                   const groupMatches = tn.matches.filter((m) => m.groupId === g.id);
@@ -1656,28 +1702,74 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                   });
                   return <GroupStandingsTable key={g.id} group={g} standings={standings} teamMap={teamMap} />;
                 })}
-                {ordered.map(([round, arr]) => (
-                  <div key={round} className="mb-3">
-                    <h3 className="font-semibold mb-1">{stageShort(arr.length)}</h3>
-                    <ul className="space-y-1 text-sm">
-                      {arr.map((m, i) => {
-                        const a = teamMap[m.aId] || "BYE/TBD";
-                        const b = teamMap[m.bId] || "BYE/TBD";
-                        const w = m.winnerId ? teamMap[m.winnerId] || "TBD" : null;
-                        const isFinals = stageShort(arr.length) === "F";
+
+                {isGroupFmt && (
+                  <div className="mb-4">
+                    <h4 className="font-semibold text-sm mb-2">Enter results</h4>
+                    <div className="grid gap-1.5 mb-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(108px, 1fr))" }}>
+                      {tn.groups.map((g) => {
+                        const groupMatches = tn.matches.filter((m) => m.groupId === g.id);
+                        const played = groupMatches.filter((m) => m.winnerId).length;
                         return (
-                          <li key={m.id}>
-                            {isFinals ? (
-                              <>{a} vs {b} — {w ? <b>{w}</b> : <span className="text-zinc-400">TBD</span>}</>
-                            ) : (
-                              <>Match {i + 1}: {a} vs {b} — {w ? <b>{w}</b> : <span className="text-zinc-400">TBD</span>}</>
-                            )}
-                          </li>
+                          <GroupCard
+                            key={g.id}
+                            group={g}
+                            playerCount={g.teamIds.length}
+                            played={played}
+                            total={groupMatches.length}
+                            selected={g.id === activeGroup?.id}
+                            onClick={() => setSelectedGroupByTournament((prev) => ({ ...prev, [tn.id]: g.id }))}
+                          />
                         );
                       })}
-                    </ul>
+                    </div>
+                    {activeGroup && (
+                      <div className="border rounded-2xl overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.12)" }}>
+                        <div className="px-3 py-2 glass-header text-sm font-semibold">{activeGroup.name} results</div>
+                        <div className="divide-y px-3" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
+                          {activeGroupMatches.map((m, i) => (
+                            <MatchRow
+                              key={m.id}
+                              idx={i + 1}
+                              m={m}
+                              teamMap={teamMap}
+                              sport={sport}
+                              stageText="Grp"
+                              onPickWinner={(mid, wid) => (isLoggedIn ? pickWinner(tn.id, mid, wid) : null)}
+                              onUpdateGames={(mid, games) => (isLoggedIn ? updateMatchGames(tn.id, mid, games) : null)}
+                              canEdit={isLoggedIn}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                ))}
+                )}
+
+                {ko.length > 0 && (
+                  <div>
+                    {isGroupFmt && <h4 className="font-semibold text-sm mb-1">Knockout results</h4>}
+                    {ordered.map(([round, arr]) => (
+                      <div key={round} className="mb-2">
+                        <div className="divide-y" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
+                          {arr.map((m, i) => (
+                            <MatchRow
+                              key={m.id}
+                              idx={i + 1}
+                              m={m}
+                              teamMap={teamMap}
+                              sport={sport}
+                              stageText={stageShort(arr.length)}
+                              onPickWinner={(mid, wid) => (isLoggedIn ? pickWinner(tn.id, mid, wid) : null)}
+                              onUpdateGames={(mid, games) => (isLoggedIn ? updateMatchGames(tn.id, mid, games) : null)}
+                              canEdit={isLoggedIn}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </Collapsible>
             );
           })}

@@ -1013,9 +1013,25 @@ export default function TournamentMaker() {
     const others = names.filter((n) => !reserved.has(n.toLowerCase()));
     const shuffled = (() => { const a = others.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; })();
 
-    const order = []; const half = size / 2, quarter = size / 4;
-    function pushRange(s, e) { for (let i = s; i < e; i++) if (slots[i] === null) order.push(i); }
-    pushRange(0, quarter); pushRange(half, half + quarter); pushRange(quarter, half); pushRange(half + quarter, size);
+    // Fill remaining slots quadrant-by-quadrant, but *interleaved* (one
+    // slot from each quadrant in turn) rather than fully draining one
+    // quadrant before the next. If there aren't enough entrants to fill
+    // every slot, this spreads the resulting byes evenly across the whole
+    // bracket instead of clustering them all in whichever quadrant was
+    // filled last — so no single seed's section of the draw ends up with
+    // a stacked run of byes just because of fill order.
+    const half = size / 2, quarter = size / 4;
+    function rangePositions(s, e) { const out = []; for (let i = s; i < e; i++) if (slots[i] === null) out.push(i); return out; }
+    const quadrants = [
+      rangePositions(0, quarter),
+      rangePositions(half, half + quarter),
+      rangePositions(quarter, half),
+      rangePositions(half + quarter, size),
+    ];
+    const order = [];
+    for (let i = 0; i < size; i++) {
+      for (const q of quadrants) { if (i < q.length) order.push(q[i]); }
+    }
 
     let oi = 0; for (const pos of order) { if (oi >= shuffled.length) break; slots[pos] = shuffled[oi++]; }
 
@@ -1449,11 +1465,19 @@ export default function TournamentMaker() {
                   <div className="grid grid-cols-2 gap-3 mb-3">
                     <label className="text-xs">
                       Number of groups
-                      <input type="number" min={2} max={8} className="mt-1 w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={numGroups} onChange={(e) => setNumGroups(Math.max(2, Number(e.target.value) || 2))} />
+                      <input type="text" inputMode="numeric" pattern="[0-9]*" className="mt-1 w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }}
+                        value={numGroups}
+                        onChange={(e) => { const v = e.target.value; if (v === "" || /^[0-9]+$/.test(v)) setNumGroups(v); }}
+                        onBlur={() => setNumGroups((v) => Math.min(8, Math.max(2, Number(v) || 2)))}
+                      />
                     </label>
                     <label className="text-xs">
                       Advance per group
-                      <input type="number" min={1} max={4} className="mt-1 w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }} value={advancePerGroup} onChange={(e) => setAdvancePerGroup(Math.max(1, Number(e.target.value) || 1))} />
+                      <input type="text" inputMode="numeric" pattern="[0-9]*" className="mt-1 w-full field border rounded-xl p-2 focus:border-white outline-none" style={{ borderColor: TM_BLUE }}
+                        value={advancePerGroup}
+                        onChange={(e) => { const v = e.target.value; if (v === "" || /^[0-9]+$/.test(v)) setAdvancePerGroup(v); }}
+                        onBlur={() => setAdvancePerGroup((v) => Math.min(4, Math.max(1, Number(v) || 1)))}
+                      />
                     </label>
                   </div>
                 )}

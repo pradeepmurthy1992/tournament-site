@@ -17,6 +17,7 @@ import {
   isMatchComplete as isGamesMatchComplete,
   pointsDiffFromGames,
 } from "./sports/badminton";
+import { resultFromScore, scoreDiff } from "./sports/score";
 import { ACCENT, ACCENT_SECONDARY } from "./theme";
 
 /* Using CDN globals (index.html):
@@ -630,7 +631,7 @@ function GameScoreEntry({ games, gameConfig, onChange, disabled }) {
   const list = games && games.length ? games : [{ a: "", b: "" }];
   const bestOf = gameConfig.bestOf;
   const winnerSide = matchWinnerSideFromGames(list, bestOf);
-  const decidedGames = list.filter((g) => g.a !== "" && g.b !== "" && isValidGame({ a: Number(g.a), b: Number(g.b) }, gameConfig)).length;
+  const decidedGames = list.filter((g, i) => g.a !== "" && g.b !== "" && isValidGame({ a: Number(g.a), b: Number(g.b) }, gameConfig, i)).length;
 
   function setGame(i, side, value) {
     const next = list.map((g, gi) => (gi === i ? { ...g, [side]: value } : g));
@@ -642,7 +643,7 @@ function GameScoreEntry({ games, gameConfig, onChange, disabled }) {
   return (
     <div className="flex flex-col gap-1 w-full sm:w-auto">
       {list.map((g, i) => {
-        const valid = g.a === "" || g.b === "" ? true : isValidGame({ a: Number(g.a), b: Number(g.b) }, gameConfig);
+        const valid = g.a === "" || g.b === "" ? true : isValidGame({ a: Number(g.a), b: Number(g.b) }, gameConfig, i);
         return (
           <div key={i} className="flex items-center gap-1">
             <span className="text-[10px] text-white/50 w-6">G{i + 1}</span>
@@ -670,14 +671,54 @@ function GameScoreEntry({ games, gameConfig, onChange, disabled }) {
   );
 }
 
-function MatchRow({ idx, m, teamMap, onPickWinner, onUpdateGames, sport, stageText, canEdit }) {
+// Single final-score entry (football/cricket): one pair of numeric inputs.
+function ScoreEntry({ score, scoreLabels, disabled, onChange }) {
+  const s = score || { a: "", b: "" };
+  return (
+    <div className="flex items-center gap-1">
+      <input type="number" min={0} disabled={disabled} value={s.a}
+        onChange={(e) => onChange({ a: e.target.value, b: s.b ?? "" })}
+        placeholder={scoreLabels?.a || "A"}
+        className="w-16 field border rounded p-1 text-center" style={{ borderColor: TM_BLUE }} />
+      <span className="text-white/50">–</span>
+      <input type="number" min={0} disabled={disabled} value={s.b}
+        onChange={(e) => onChange({ a: s.a ?? "", b: e.target.value })}
+        placeholder={scoreLabels?.b || "B"}
+        className="w-16 field border rounded p-1 text-center" style={{ borderColor: TM_BLUE }} />
+    </div>
+  );
+}
+
+// Direct win/draw/loss picker (chess): no score or games, just the result.
+function ResultPicker({ value, aName, bName, disabled, onChange }) {
+  return (
+    <div className="w-full sm:w-auto sm:min-w-[200px]">
+      <DarkSelect
+        value={value || ""}
+        onChange={onChange}
+        disabled={disabled}
+        options={[
+          { value: "", label: "Result — pick" },
+          { value: "a", label: `${aName} wins` },
+          { value: "b", label: `${bName} wins` },
+          { value: "draw", label: "Draw" },
+        ]}
+      />
+    </div>
+  );
+}
+
+function MatchRow({ idx, m, teamMap, onPickWinner, onUpdateGames, onUpdateScore, onUpdateResult, sport, stageText, canEdit }) {
   const aName = teamMap[m.aId] || (m.aId ? "Unknown" : "BYE/TBD");
   const bName = teamMap[m.bId] || (m.bId ? "Unknown" : "BYE/TBD");
   const bothEmpty = !m.aId && !m.bId;
   const singleBye = (!!m.aId && !m.bId) || (!m.aId && !!m.bId);
   const usesGames = sport?.matchModel === "games" && !bothEmpty && !singleBye;
+  const usesScore = sport?.matchModel === "score" && !bothEmpty && !singleBye;
+  const usesResult = sport?.matchModel === "result" && !bothEmpty && !singleBye;
   const aEliminated = m.winnerId && m.aId && m.winnerId !== m.aId;
   const bEliminated = m.winnerId && m.bId && m.winnerId !== m.bId;
+  const scoreTiedInKnockout = usesScore && m.stage === "knockout" && resultFromScore(m.score) === "draw";
   return (
     <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-1 sm:gap-2 py-2 text-sm">
       <span className="text-zinc-400 sm:w-24">
@@ -704,6 +745,58 @@ function MatchRow({ idx, m, teamMap, onPickWinner, onUpdateGames, sport, stageTe
                 {m.winnerId && <> — Winner: <b>{teamMap[m.winnerId] || "TBD"}</b></>}
               </>
             )}
+          </span>
+        )
+      ) : usesScore ? (
+        canEdit ? (
+          <div className="flex flex-col gap-1">
+            <ScoreEntry score={m.score} scoreLabels={sport.scoreLabels} disabled={false} onChange={(score) => onUpdateScore(m.id, score)} />
+            {scoreTiedInKnockout && (
+              <div>
+                <span className="text-[10px] text-amber-300 block mb-1">Scores level — pick the winner (extra time / shootout / etc.)</span>
+                <DarkSelect
+                  value={m.winnerId || ""}
+                  onChange={(val) => onPickWinner(m.id, val || null)}
+                  options={[{ value: "", label: "Winner — pick" }, { value: m.aId, label: aName }, { value: m.bId, label: bName }]}
+                />
+              </div>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs">
+            {!m.score ? (
+              <span className="text-white/60">Not started</span>
+            ) : (
+              <>
+                {m.score.a}-{m.score.b}
+                {m.drawn && <> — <b>Draw</b></>}
+                {m.winnerId && <> — Winner: <b>{teamMap[m.winnerId] || "TBD"}</b></>}
+              </>
+            )}
+          </span>
+        )
+      ) : usesResult ? (
+        canEdit ? (
+          <div className="flex flex-col gap-1">
+            <ResultPicker
+              value={m.pendingDraw ? "draw" : m.drawn ? "draw" : m.winnerId === m.aId ? "a" : m.winnerId === m.bId ? "b" : ""}
+              aName={aName} bName={bName} disabled={false}
+              onChange={(val) => onUpdateResult(m.id, val || null)}
+            />
+            {m.pendingDraw && (
+              <div>
+                <span className="text-[10px] text-amber-300 block mb-1">Drawn — pick the tiebreak winner (rapid/armageddon/etc.)</span>
+                <DarkSelect
+                  value={m.winnerId || ""}
+                  onChange={(val) => onPickWinner(m.id, val || null)}
+                  options={[{ value: "", label: "Winner — pick" }, { value: m.aId, label: aName }, { value: m.bId, label: bName }]}
+                />
+              </div>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs">
+            {m.winnerId ? <>Winner: <b>{teamMap[m.winnerId] || "TBD"}</b></> : m.drawn ? <b>Draw</b> : m.pendingDraw ? <span className="text-white/60">Drawn — tiebreak pending</span> : <span className="text-white/60">Result: TBD</span>}
           </span>
         )
       ) : !canEdit ? (
@@ -1063,7 +1156,7 @@ export default function TournamentMaker() {
         const gm = groupMatches.filter((m) => m.groupId === g.id);
         const standings = computeStandings(g.teamIds, gm, {
           pointsRule: sport.pointsRule,
-          getDiff: sport.matchModel === "games" ? (m) => pointsDiffFromGames(m.games) : undefined,
+          getDiff: sport.matchModel === "games" ? (m) => pointsDiffFromGames(m.games) : sport.matchModel === "score" ? (m) => scoreDiff(m.score) : undefined,
         });
         return topNTeamIds(standings, tn.groupStage.advancePerGroup);
       });
@@ -1106,6 +1199,51 @@ export default function TournamentMaker() {
       return { ...tn, matches };
     }));
   }
+
+  // Football/cricket (matchModel "score"): a level score is a valid final
+  // result in a group/league match (a draw); in the knockout stage it
+  // isn't final on its own — the UI additionally requires an explicit
+  // winner pick (extra time / shootout / Super Over, not modeled here).
+  function updateMatchScore(tournamentId, matchId, score) {
+    if (!isLoggedIn) return alert("Please log in first.");
+    setTournaments((prev) => prev.map((tn) => {
+      if (tn.id !== tournamentId) return tn;
+      const matches = tn.matches.map((m) => {
+        if (m.id !== matchId) return m;
+        const result = resultFromScore(score);
+        if (result === "draw" && m.stage === "knockout") {
+          // Keep any previously-chosen tiebreak winner if the score is
+          // re-edited but still level; otherwise stays undecided until
+          // the admin picks one via the tiebreak selector.
+          return { ...m, score, drawn: false, status: m.winnerId ? "Final" : "Scheduled" };
+        }
+        const winnerId = result === "a" ? m.aId : result === "b" ? m.bId : null;
+        return { ...m, score, winnerId, drawn: result === "draw", status: result ? "Final" : "Scheduled" };
+      });
+      return { ...tn, matches };
+    }));
+  }
+
+  // Chess (matchModel "result"): admin picks "a" | "b" | "draw" directly.
+  // A drawn result is final in a group/league match, but a knockout match
+  // must produce someone to advance — same rule as updateMatchScore, so a
+  // drawn knockout chess game doesn't silently strand that bracket slot.
+  function updateMatchResult(tournamentId, matchId, result) {
+    if (!isLoggedIn) return alert("Please log in first.");
+    setTournaments((prev) => prev.map((tn) => {
+      if (tn.id !== tournamentId) return tn;
+      const matches = tn.matches.map((m) => {
+        if (m.id !== matchId) return m;
+        if (result === "draw" && m.stage === "knockout") {
+          return { ...m, winnerId: null, drawn: false, pendingDraw: true, status: "Scheduled" };
+        }
+        const winnerId = result === "a" ? m.aId : result === "b" ? m.bId : null;
+        return { ...m, winnerId, drawn: result === "draw", pendingDraw: false, status: result ? "Final" : "Scheduled" };
+      });
+      return { ...tn, matches };
+    }));
+  }
+
   function generateNextRound(tournamentId) {
     if (!isLoggedIn) return alert("Please log in first.");
     setTournaments((prev) => prev.map((tn) => {
@@ -1675,6 +1813,8 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                                 stageText="Grp"
                                 onPickWinner={() => {}}
                                 onUpdateGames={() => {}}
+                                onUpdateScore={() => {}}
+                                onUpdateResult={() => {}}
                                 canEdit={false}
                               />
                             ))}
@@ -1759,7 +1899,7 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                   const groupMatches = tn.matches.filter((m) => m.groupId === g.id);
                   const standings = computeStandings(g.teamIds, groupMatches, {
                     pointsRule: sport.pointsRule,
-                    getDiff: sport.matchModel === "games" ? (m) => pointsDiffFromGames(m.games) : undefined,
+                    getDiff: sport.matchModel === "games" ? (m) => pointsDiffFromGames(m.games) : sport.matchModel === "score" ? (m) => scoreDiff(m.score) : undefined,
                   });
                   return <GroupStandingsTable key={g.id} group={g} standings={standings} teamMap={teamMap} />;
                 })}
@@ -1798,6 +1938,8 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                               stageText="Grp"
                               onPickWinner={(mid, wid) => (isLoggedIn ? pickWinner(tn.id, mid, wid) : null)}
                               onUpdateGames={(mid, games) => (isLoggedIn ? updateMatchGames(tn.id, mid, games) : null)}
+                              onUpdateScore={(mid, score) => (isLoggedIn ? updateMatchScore(tn.id, mid, score) : null)}
+                              onUpdateResult={(mid, result) => (isLoggedIn ? updateMatchResult(tn.id, mid, result) : null)}
                               canEdit={isLoggedIn}
                             />
                           ))}
@@ -1823,6 +1965,8 @@ Meera`} value={namesText} onChange={(e) => setNamesText(e.target.value)} />
                               stageText={stageShort(arr.length)}
                               onPickWinner={(mid, wid) => (isLoggedIn ? pickWinner(tn.id, mid, wid) : null)}
                               onUpdateGames={(mid, games) => (isLoggedIn ? updateMatchGames(tn.id, mid, games) : null)}
+                              onUpdateScore={(mid, score) => (isLoggedIn ? updateMatchScore(tn.id, mid, score) : null)}
+                              onUpdateResult={(mid, result) => (isLoggedIn ? updateMatchResult(tn.id, mid, result) : null)}
                               canEdit={isLoggedIn}
                             />
                           ))}

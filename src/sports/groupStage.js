@@ -61,16 +61,34 @@ export function buildGroupMatches(groupId, teamIds) {
 }
 
 // matches: all matches for one group. getDiff(match) -> {a,b} points/games
-// scored by side A/B, used only as a tiebreaker (optional).
-export function computeStandings(teamIds, matches, { pointsRule = { win: 1, loss: 0 }, getDiff } = {}) {
+// scored by side A/B, used only as a tiebreaker (optional). A match with
+// `drawn: true` (score/result-model sports — football, cricket, chess)
+// counts as decided with no winner: both sides get pointsRule.draw.
+export function computeStandings(teamIds, matches, { pointsRule = { win: 1, loss: 0, draw: 0 }, getDiff } = {}) {
   const table = new Map(teamIds.map((id) => [id, {
-    teamId: id, played: 0, won: 0, lost: 0, points: 0, diffFor: 0, diffAgainst: 0,
+    teamId: id, played: 0, won: 0, drawn: 0, lost: 0, points: 0, diffFor: 0, diffAgainst: 0,
   }]));
 
   const headToHead = new Map(); // `${winnerId}:${loserId}` -> true
 
   for (const m of matches) {
-    if (!m.aId || !m.bId || !m.winnerId) continue; // skip byes / undecided
+    if (!m.aId || !m.bId) continue; // bye
+    if (!m.winnerId && !m.drawn) continue; // not played yet
+
+    if (m.drawn) {
+      const a = table.get(m.aId), b = table.get(m.bId);
+      if (!a || !b) continue;
+      a.played++; b.played++;
+      a.drawn++; b.drawn++;
+      a.points += pointsRule.draw ?? 0; b.points += pointsRule.draw ?? 0;
+      if (typeof getDiff === "function") {
+        const d = getDiff(m) || { a: 0, b: 0 };
+        a.diffFor += d.a; a.diffAgainst += d.b;
+        b.diffFor += d.b; b.diffAgainst += d.a;
+      }
+      continue;
+    }
+
     const loserId = m.winnerId === m.aId ? m.bId : m.aId;
     const w = table.get(m.winnerId), l = table.get(loserId);
     if (!w || !l) continue;
@@ -103,7 +121,7 @@ export function computeStandings(teamIds, matches, { pointsRule = { win: 1, loss
 }
 
 export function isGroupComplete(matches) {
-  return matches.every((m) => (!m.aId || !m.bId) || !!m.winnerId);
+  return matches.every((m) => (!m.aId || !m.bId) || !!m.winnerId || !!m.drawn);
 }
 
 export function topNTeamIds(standings, n) {

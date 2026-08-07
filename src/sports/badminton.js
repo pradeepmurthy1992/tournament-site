@@ -1,9 +1,28 @@
-// Game-score validation and winner derivation for "games"-model sports
-// (badminton today; same shape works for table tennis with a different
-// gameConfig). A game is { a: number, b: number } — raw points for side A/B.
+// Game-score validation and winner derivation for "games"-model sports:
+// badminton, table tennis, and volleyball all share this shape (best-of-N
+// games, each with a points target). A game is { a: number, b: number } —
+// raw points for side A/B.
+//
+// gameConfig: { pointsToWin, winBy, cap, bestOf, deciderPointsToWin?,
+// deciderWinBy?, deciderCap? }. The decider* fields are optional and only
+// matter for sports like volleyball where the final (deciding) game plays
+// to a different target than the rest (e.g. sets 1-4 to 25, set 5 to 15).
 
-export function isValidGame(game, gameConfig) {
-  const { pointsToWin, winBy, cap } = gameConfig;
+function effectiveConfig(gameConfig, gameIndex) {
+  const { bestOf, deciderPointsToWin } = gameConfig;
+  const isDecider = gameIndex === bestOf - 1;
+  if (isDecider && deciderPointsToWin != null) {
+    return {
+      pointsToWin: deciderPointsToWin,
+      winBy: gameConfig.deciderWinBy ?? gameConfig.winBy,
+      cap: gameConfig.deciderCap ?? null,
+    };
+  }
+  return gameConfig;
+}
+
+export function isValidGame(game, gameConfig, gameIndex = 0) {
+  const { pointsToWin, winBy, cap } = effectiveConfig(gameConfig, gameIndex);
   const a = Number(game?.a), b = Number(game?.b);
   if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b < 0) return false;
   if (a === b) return false;

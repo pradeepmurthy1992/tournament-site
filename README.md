@@ -116,37 +116,55 @@ actually testable, rather than one huge unreviewable change:
 Tournaments carry a `sport` id (`src/sports/registry.js`) and a `format`
 (`"knockout"` or `"groups"`). Existing tournaments with no `sport`/`format`
 field default to `sport: "generic"`, `format: "knockout"` — the original
-pick-a-winner single-elimination behavior, unchanged.
+pick-a-winner single-elimination behavior, unchanged. Every sport plugs
+into the same knockout bracket engine and the same round-robin group
+engine (`src/sports/groupStage.js`) — only how a single *match* is scored
+differs, via one of four `matchModel`s:
 
-**Implemented:**
-- `generic` — pick a winner per match (original behavior).
-- `badminton` — best-of-3 games to 21 points, win by 2, hard cap at 30
-  (`src/sports/badminton.js`). Winner is derived automatically once a side
-  wins 2 games.
-- Round-robin groups (`src/sports/groupStage.js`) — sport-agnostic: splits
-  entrants into groups, schedules a round robin (circle method), and
-  computes a standings table (Played/Won/Lost/Points, tiebreak by
-  head-to-head then point differential). Works with any sport whose matches
-  end up with a `winnerId`. "Generate Knockout Bracket" seeds the top N per
-  group into the existing knockout engine once every group is complete
-  (paid tier only — free tier stops at the round-robin stage).
+- **`"winner"`** — admin just picks a winner. `generic`, the original
+  behavior.
+- **`"games"`** — best-of-N games to a target score
+  (`src/sports/badminton.js`, shared despite the filename). Winner is
+  derived automatically once a side wins enough games.
+  - `badminton` — best-of-3 to 21, win by 2, capped at 30.
+  - `tabletennis` — best-of-5 to 11, win by 2, no cap.
+  - `volleyball` — best-of-5 to 25, win by 2; the deciding 5th set (if
+    reached) only goes to 15 — `gameConfig.deciderPointsToWin` tells
+    `badminton.js` to switch targets on the last possible game.
+- **`"score"`** — a final score per side (`src/sports/score.js`), draws
+  allowed. Used for `football` (3/1/0 points, goal-difference tiebreak)
+  and `cricket` (2/1/0, run-difference tiebreak — see note below). In the
+  **group/league stage** a level score is a legitimate final result; in
+  the **knockout stage** it isn't enough on its own — the UI additionally
+  requires an explicit winner pick (standing in for extra time / a
+  penalty shootout / a Super Over, none of which are modeled play-by-play
+  here, just the final outcome).
+- **`"result"`** — win/draw/loss picked directly, no score or games. Used
+  for `chess` (win = 1 point, draw = 0.5, loss = 0).
 
-**Designed but not yet built** (`implemented: false` in the registry —
-extend `sports/` following the `badminton.js` pattern):
-- **Table tennis** — same shape as badminton: best-of-5/7 games to 11,
-  win by 2 (no hard cap). Reuses the whole `games` match model.
-- **Tennis** — seeded single-elim draw (reuses the existing bracket engine
-  as-is), but each match is best-of-3/5 *sets*, and each set is first-to-6
-  *games* win-by-2 with a tiebreak at 6-6. Needs a new `matchModel: "sets"`
-  (a set is itself a mini best-of-N-games contest).
-- **Football** — group stage = round robin, 3/1/0 points for win/draw/loss,
-  tiebreak by goal difference then goals-for then head-to-head; knockout =
-  single match, extra time + penalties on a draw. Needs a `matchModel:
-  "score"` (free-form goals-for-each-side, draws allowed) and points-table
-  support for draws (the current `groupStage.js` assumes every match has a
-  clear winner).
-- **Cricket** — league table, 2 points per win (0 for a loss, tie rules
-  vary by competition), Net Run Rate as the primary tiebreaker instead of
-  point/game differential; tied knockout matches go to a Super Over. Also
-  needs the `"score"` match model plus an NRR calculator (runs/overs per
-  side, not just a point total).
+**Cricket tiebreak note:** real cricket ranks tied group-stage teams by
+Net Run Rate, which needs overs-faced/overs-bowled per innings, not just
+a runs total. That's not modeled here — cricket currently uses simple run
+difference instead, which is disclosed in the registry rather than
+mislabeled as true NRR. Good enough for a small club/office group stage;
+would need real overs tracking to be tournament-grade.
+
+**Designed but not yet built:**
+- **Tennis** (`implemented: false`) — seeded single-elim draw (reuses the
+  existing bracket engine as-is), but each match is best-of-3/5 *sets*,
+  and each set is first-to-6 *games* win-by-2 with a tiebreak at 6-6.
+  Needs a new `matchModel: "sets"` (a set is itself a mini best-of-N-games
+  contest) — structurally different enough from the `"games"` model above
+  that it wasn't worth forcing into the same shape.
+- **Swiss-system pairing for chess** — the usual format for large chess
+  fields (pair players with similar scores each round, never repeat a
+  pairing). Chess today runs correctly via the existing round-robin and
+  knockout formats (fine for club-sized fields), but Swiss is a genuinely
+  different *scheduling* algorithm — dynamic, generated round-by-round
+  from live standings, rather than computed once upfront — and wasn't
+  built this round.
+- **More sports generally** — the whole point of the `matchModel` split
+  above is that adding another sport is usually just a new
+  `src/sports/registry.js` entry (pick the closest existing `matchModel`
+  and supply its config) rather than new engine code. Kabaddi, basketball,
+  etc. would mostly slot in the same way volleyball did.
